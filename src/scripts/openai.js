@@ -204,6 +204,36 @@ export const chat_completion_sources = {
     SILICONFLOW: 'siliconflow',
 };
 
+const CUSTOM_MODEL_RECORD_FLAG = '__tauritavern_custom_model';
+
+const customModelSourceBindings = {
+    [chat_completion_sources.OPENAI]: { selectors: ['#model_openai_select', '#openai_external_category'], setting: 'openai_model' },
+    [chat_completion_sources.CLAUDE]: { selectors: ['#model_claude_select'], setting: 'claude_model' },
+    [chat_completion_sources.OPENROUTER]: { selectors: ['#model_openrouter_select'], setting: 'openrouter_model' },
+    [chat_completion_sources.AI21]: { selectors: ['#model_ai21_select'], setting: 'ai21_model' },
+    [chat_completion_sources.MAKERSUITE]: { selectors: ['#model_google_select', '#google_other_models'], setting: 'google_model' },
+    [chat_completion_sources.VERTEXAI]: { selectors: ['#model_vertexai_select'], setting: 'vertexai_model' },
+    [chat_completion_sources.MISTRALAI]: { selectors: ['#model_mistralai_select'], setting: 'mistralai_model' },
+    [chat_completion_sources.CUSTOM]: { selectors: ['#model_custom_select', '#model_custom_select_fill'], setting: 'custom_model' },
+    [chat_completion_sources.COHERE]: { selectors: ['#model_cohere_select'], setting: 'cohere_model' },
+    [chat_completion_sources.PERPLEXITY]: { selectors: ['#model_perplexity_select'], setting: 'perplexity_model' },
+    [chat_completion_sources.GROQ]: { selectors: ['#model_groq_select'], setting: 'groq_model' },
+    [chat_completion_sources.ELECTRONHUB]: { selectors: ['#model_electronhub_select'], setting: 'electronhub_model' },
+    [chat_completion_sources.CHUTES]: { selectors: ['#model_chutes_select'], setting: 'chutes_model' },
+    [chat_completion_sources.NANOGPT]: { selectors: ['#model_nanogpt_select'], setting: 'nanogpt_model' },
+    [chat_completion_sources.DEEPSEEK]: { selectors: ['#model_deepseek_select'], setting: 'deepseek_model' },
+    [chat_completion_sources.AIMLAPI]: { selectors: ['#model_aimlapi_select'], setting: 'aimlapi_model' },
+    [chat_completion_sources.XAI]: { selectors: ['#model_xai_select'], setting: 'xai_model' },
+    [chat_completion_sources.POLLINATIONS]: { selectors: ['#model_pollinations_select'], setting: 'pollinations_model' },
+    [chat_completion_sources.MOONSHOT]: { selectors: ['#model_moonshot_select'], setting: 'moonshot_model' },
+    [chat_completion_sources.FIREWORKS]: { selectors: ['#model_fireworks_select'], setting: 'fireworks_model' },
+    [chat_completion_sources.COMETAPI]: { selectors: ['#model_cometapi_select'], setting: 'cometapi_model' },
+    [chat_completion_sources.ZAI]: { selectors: ['#model_zai_select'], setting: 'zai_model' },
+    [chat_completion_sources.SILICONFLOW]: { selectors: ['#model_siliconflow_select'], setting: 'siliconflow_model' },
+};
+
+const customModelSupportedSources = Object.keys(customModelSourceBindings).join(',');
+
 const custom_api_formats = {
     OPENAI_COMPAT: 'openai_compat',
     OPENAI_RESPONSES: 'openai_responses',
@@ -490,6 +520,7 @@ const default_settings = {
     request_image_resolution: '',
     seed: -1,
     n: 1,
+    custom_models_by_source: {},
     bind_preset_to_connection: true,
     extensions: {},
 };
@@ -1971,8 +2002,171 @@ function calculateChutesCost() {
     $('#chutes_max_prompt_cost').text(cost);
 }
 
+function parseCustomModelList(value) {
+    return Array.from(new Set(String(value ?? '')
+        .split(/\r?\n|,/)
+        .map(item => item.trim())
+        .filter(Boolean)));
+}
+
+function isCustomModelSourceSupported(source) {
+    return customModelSupportedSources.split(',').includes(source)
+        && Object.prototype.hasOwnProperty.call(customModelSourceBindings, source);
+}
+
+function normalizeCustomModelsBySource(value) {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) {
+        return {};
+    }
+
+    return Object.entries(value).reduce((accumulator, [source, models]) => {
+        if (!isCustomModelSourceSupported(source)) {
+            return accumulator;
+        }
+
+        const normalizedModels = Array.isArray(models)
+            ? parseCustomModelList(models.join('\n'))
+            : parseCustomModelList(models);
+
+        if (normalizedModels.length > 0) {
+            accumulator[source] = normalizedModels;
+        }
+
+        return accumulator;
+    }, {});
+}
+
+function getCustomModelsForSource(source = oai_settings.chat_completion_source) {
+    oai_settings.custom_models_by_source = normalizeCustomModelsBySource(oai_settings.custom_models_by_source);
+    return oai_settings.custom_models_by_source[source] || [];
+}
+
+function setCustomModelsForSource(source, models) {
+    const modelsBySource = normalizeCustomModelsBySource(oai_settings.custom_models_by_source);
+    const normalizedModels = parseCustomModelList(models.join('\n'));
+
+    if (normalizedModels.length > 0) {
+        modelsBySource[source] = normalizedModels;
+    } else {
+        delete modelsBySource[source];
+    }
+
+    oai_settings.custom_models_by_source = modelsBySource;
+}
+
+function getFetchedModelRecords(records) {
+    return Array.isArray(records)
+        ? records.filter(model => !model?.[CUSTOM_MODEL_RECORD_FLAG])
+        : [];
+}
+
+function mergeCustomModelRecords(records, source = oai_settings.chat_completion_source) {
+    const merged = [];
+    const seen = new Set();
+
+    for (const model of getFetchedModelRecords(records)) {
+        const id = String(typeof model === 'string' ? model : model?.id ?? '').trim();
+        if (!id || seen.has(id)) {
+            continue;
+        }
+
+        seen.add(id);
+        merged.push(typeof model === 'object' ? { ...model, id } : { id });
+    }
+
+    for (const id of getCustomModelsForSource(source)) {
+        if (seen.has(id)) {
+            continue;
+        }
+
+        seen.add(id);
+        merged.push({
+            id,
+            name: id,
+            [CUSTOM_MODEL_RECORD_FLAG]: true,
+        });
+    }
+
+    return merged;
+}
+
+function getCurrentSourceLabel() {
+    const label = $('#chat_completion_source option:selected').text().trim();
+    return label || oai_settings.chat_completion_source;
+}
+
+function refreshCustomModelsEditorForCurrentSource() {
+    const source = oai_settings.chat_completion_source;
+    const isSupported = isCustomModelSourceSupported(source);
+
+    $('#chat_completion_custom_models_source_name').text(getCurrentSourceLabel());
+    $('#chat_completion_custom_models_text')
+        .val(getCustomModelsForSource(source).join('\n'))
+        .prop('disabled', !isSupported);
+    $('#chat_completion_custom_models_apply')
+        .toggleClass('disabled', !isSupported)
+        .attr('aria-disabled', String(!isSupported));
+}
+
+function refreshCustomModelSelectOptions(source = oai_settings.chat_completion_source) {
+    const binding = customModelSourceBindings[source];
+    if (!binding) {
+        return;
+    }
+
+    const customModels = getCustomModelsForSource(source);
+
+    for (const selector of binding.selectors) {
+        const $element = $(selector);
+        if ($element.length === 0) {
+            continue;
+        }
+
+        $element.find('[data-custom-model-option="true"]').remove();
+
+        const existingValues = new Set($element.find('option').map((_, option) => String(option.value)).get());
+        const options = customModels
+            .filter(modelId => !existingValues.has(modelId))
+            .map(modelId => $('<option>', {
+                value: modelId,
+                text: modelId,
+            }).attr('data-custom-model-option', 'true'));
+
+        if (options.length === 0) {
+            continue;
+        }
+
+        if ($element.is('select')) {
+            const $group = $('<optgroup>', { label: 'Custom Models' })
+                .attr('data-custom-model-option', 'true');
+            $group.append(options);
+            $element.append($group);
+        } else {
+            $element.append(options);
+        }
+
+        const selectedModel = oai_settings[binding.setting];
+        if (selectedModel && $element.is('select')) {
+            $element.val(selectedModel);
+        }
+    }
+}
+
+function applyCustomModelsForCurrentSource() {
+    const source = oai_settings.chat_completion_source;
+    if (!isCustomModelSourceSupported(source)) {
+        return;
+    }
+
+    const modelIds = parseCustomModelList($('#chat_completion_custom_models_text').val());
+    setCustomModelsForSource(source, modelIds);
+    saveModelList(getFetchedModelRecords(model_list));
+    saveSettingsDebounced();
+    toastr.success(t`Custom models updated`);
+}
+
 function saveModelList(data) {
-    model_list = data.map((model) => ({ ...model }));
+    model_list = mergeCustomModelRecords(data, oai_settings.chat_completion_source);
     model_list.sort((a, b) => a?.id && b?.id && a.id.localeCompare(b.id));
 
     if (oai_settings.chat_completion_source == chat_completion_sources.OPENROUTER) {
@@ -2301,6 +2495,9 @@ function saveModelList(data) {
 
         $('#model_moonshot_select').val(oai_settings.moonshot_model).trigger('change');
     }
+
+    refreshCustomModelsEditorForCurrentSource();
+    refreshCustomModelSelectOptions();
 }
 
 function appendOpenRouterOptions(model_list, groupModels = false, sort = false) {
@@ -4303,6 +4500,7 @@ function loadOpenAISettings(data, settings) {
             }
         }
     }
+    oai_settings.custom_models_by_source = normalizeCustomModelsBySource(oai_settings.custom_models_by_source);
 
     $(`#settings_preset_openai option[value="${openai_setting_names[oai_settings.preset_settings_openai]}"]`).prop('selected', true);
     $('#bind_preset_to_connection').prop('checked', oai_settings.bind_preset_to_connection);
@@ -6788,6 +6986,12 @@ export function initOpenAI() {
         cancelStatusCheck('Chat Completion source changed');
         model_list = [];
         applyChatCompletionSourceSelection(String($(this).find(':selected').val()));
+        if (getCustomModelsForSource(oai_settings.chat_completion_source).length > 0) {
+            saveModelList([]);
+        } else {
+            refreshCustomModelsEditorForCurrentSource();
+            refreshCustomModelSelectOptions();
+        }
         toggleChatCompletionForms();
         updateCustomEndpointPreview();
         updateCustomClaudePromptCachingVisibility();
@@ -7182,6 +7386,7 @@ export function initOpenAI() {
     $('#openai_logit_bias_delete_preset').on('click', onLogitBiasPresetDeleteClick);
     $('#import_oai_preset').on('click', onImportPresetClick);
     $('#openai_proxy_password_show').on('click', onProxyPasswordShowClick);
+    $('#chat_completion_custom_models_apply').on('click', applyCustomModelsForCurrentSource);
     $('#customize_additional_parameters').on('click', onCustomizeParametersClick);
     $('#openai_proxy_preset').on('change', onProxyPresetChange);
 }
