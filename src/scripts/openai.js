@@ -209,6 +209,23 @@ export const chat_completion_sources = {
     SILICONFLOW: 'siliconflow',
 };
 
+const additionalParameterSources = Object.freeze([
+    chat_completion_sources.OPENAI,
+    chat_completion_sources.OPENROUTER,
+    chat_completion_sources.CUSTOM,
+    chat_completion_sources.CLAUDE,
+    chat_completion_sources.MAKERSUITE,
+    chat_completion_sources.VERTEXAI,
+    chat_completion_sources.DEEPSEEK,
+    chat_completion_sources.COHERE,
+    chat_completion_sources.GROQ,
+    chat_completion_sources.MOONSHOT,
+    chat_completion_sources.NANOGPT,
+    chat_completion_sources.CHUTES,
+    chat_completion_sources.SILICONFLOW,
+    chat_completion_sources.ZAI,
+]);
+
 const custom_api_formats = {
     OPENAI_COMPAT: 'openai_compat',
     OPENAI_RESPONSES: 'openai_responses',
@@ -2964,11 +2981,6 @@ export async function createGenerationParameters(settings, model, type, messages
         generate_data.stop = getCustomStoppingStrings(); // Mistral shouldn't have limits on stop strings.
     }
 
-    const additionalParameterSources = [
-        chat_completion_sources.CUSTOM,
-        chat_completion_sources.CLAUDE,
-        chat_completion_sources.DEEPSEEK,
-    ];
     if (additionalParameterSources.includes(settings.chat_completion_source)) {
         generate_data.custom_include_body = settings.custom_include_body;
         generate_data.custom_exclude_body = settings.custom_exclude_body;
@@ -4636,7 +4648,7 @@ async function getStatusOpen() {
         await validateReverseProxy();
     }
 
-    if ([chat_completion_sources.CUSTOM, chat_completion_sources.CLAUDE, chat_completion_sources.DEEPSEEK].includes(oai_settings.chat_completion_source)) {
+    if (additionalParameterSources.includes(oai_settings.chat_completion_source)) {
         data.custom_include_headers = oai_settings.custom_include_headers;
     }
 

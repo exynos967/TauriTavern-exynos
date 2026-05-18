@@ -84,6 +84,7 @@ pub(super) async fn resolve_generate_api_config(
             &dto.payload,
             reverse_proxy,
             proxy_password,
+            &custom_headers_raw,
             secret_repository,
         )
         .await;
@@ -328,9 +329,11 @@ async fn resolve_vertexai_generate_api_config(
     payload: &Map<String, Value>,
     reverse_proxy: &str,
     proxy_password: &str,
+    custom_headers_raw: &str,
     secret_repository: &Arc<dyn SecretRepository>,
 ) -> Result<ChatCompletionApiConfig, ApplicationError> {
-    let extra_headers = HashMap::new();
+    let extra_headers =
+        source_extra_headers_with_overrides(ChatCompletionSource::VertexAi, custom_headers_raw)?;
 
     if !reverse_proxy.is_empty() {
         return Ok(ChatCompletionApiConfig {
@@ -720,11 +723,11 @@ mod tests {
     #[tokio::test]
     async fn native_generate_merges_additional_headers() {
         let secret_repository: Arc<dyn SecretRepository> = Arc::new(TestSecretRepository {
-            secrets: HashMap::from([("api_key_claude".to_string(), "secret".to_string())]),
+            secrets: HashMap::from([("api_key_openrouter".to_string(), "secret".to_string())]),
         });
         let dto = ChatCompletionGenerateRequestDto {
             payload: json!({
-                "chat_completion_source": "claude",
+                "chat_completion_source": "openrouter",
                 "custom_include_headers": "X-Trace: abc\nX-Debug: true"
             })
             .as_object()
@@ -733,7 +736,7 @@ mod tests {
         };
 
         let config =
-            resolve_generate_api_config(ChatCompletionSource::Claude, &dto, &secret_repository)
+            resolve_generate_api_config(ChatCompletionSource::OpenRouter, &dto, &secret_repository)
                 .await
                 .expect("generate config should resolve");
 
@@ -744,6 +747,32 @@ mod tests {
         assert_eq!(
             config.extra_headers.get("X-Debug").map(String::as_str),
             Some("true")
+        );
+    }
+
+    #[tokio::test]
+    async fn vertex_generate_merges_additional_headers() {
+        let secret_repository: Arc<dyn SecretRepository> = Arc::new(TestSecretRepository {
+            secrets: HashMap::from([("api_key_vertexai".to_string(), "secret".to_string())]),
+        });
+        let dto = ChatCompletionGenerateRequestDto {
+            payload: json!({
+                "chat_completion_source": "vertexai",
+                "custom_include_headers": "X-Trace: vertex"
+            })
+            .as_object()
+            .cloned()
+            .expect("payload should be object"),
+        };
+
+        let config =
+            resolve_generate_api_config(ChatCompletionSource::VertexAi, &dto, &secret_repository)
+                .await
+                .expect("generate config should resolve");
+
+        assert_eq!(
+            config.extra_headers.get("X-Trace").map(String::as_str),
+            Some("vertex")
         );
     }
 

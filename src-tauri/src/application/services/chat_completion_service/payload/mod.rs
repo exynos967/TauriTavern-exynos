@@ -59,10 +59,7 @@ pub(super) fn build_payload(
         ChatCompletionSource::VertexAi => Ok(vertexai::build(payload)?),
     }?;
 
-    if matches!(
-        source,
-        ChatCompletionSource::Claude | ChatCompletionSource::DeepSeek
-    ) {
+    if supports_additional_parameters(source) {
         shared::apply_custom_body_overrides(
             &mut upstream_payload,
             &include_body_raw,
@@ -73,6 +70,10 @@ pub(super) fn build_payload(
     Ok((endpoint_path, upstream_payload))
 }
 
+fn supports_additional_parameters(source: ChatCompletionSource) -> bool {
+    !matches!(source, ChatCompletionSource::Custom)
+}
+
 #[cfg(test)]
 mod tests {
     use serde_json::json;
@@ -81,10 +82,10 @@ mod tests {
     use crate::domain::repositories::chat_completion_repository::ChatCompletionSource;
 
     #[test]
-    fn deepseek_applies_additional_body_overrides() {
+    fn native_openai_compatible_provider_applies_additional_body_overrides() {
         let payload = json!({
-            "chat_completion_source": "deepseek",
-            "model": "deepseek-v4-flash",
+            "chat_completion_source": "openrouter",
+            "model": "openai/gpt-4.1-mini",
             "messages": [{"role": "user", "content": "hello"}],
             "custom_include_body": "{\"x_extra\":true}",
             "custom_exclude_body": "[\"temperature\"]"
@@ -94,7 +95,7 @@ mod tests {
         .expect("payload must be object");
 
         let (_, upstream) =
-            build_payload(ChatCompletionSource::DeepSeek, payload).expect("payload should build");
+            build_payload(ChatCompletionSource::OpenRouter, payload).expect("payload should build");
         let body = upstream.as_object().expect("body must be object");
 
         assert_eq!(
@@ -129,5 +130,32 @@ mod tests {
             Some("override")
         );
         assert!(body.get("stream").is_none());
+    }
+
+    #[test]
+    fn makersuite_applies_additional_body_overrides() {
+        let payload = json!({
+            "chat_completion_source": "makersuite",
+            "model": "gemini-2.5-flash",
+            "messages": [{"role": "user", "content": "hello"}],
+            "custom_include_body": "{\"labels\":{\"source\":\"override\"}}",
+            "custom_exclude_body": "[\"generationConfig\"]"
+        })
+        .as_object()
+        .cloned()
+        .expect("payload must be object");
+
+        let (_, upstream) =
+            build_payload(ChatCompletionSource::Makersuite, payload).expect("payload should build");
+        let body = upstream.as_object().expect("body must be object");
+
+        assert_eq!(
+            body.get("labels")
+                .and_then(serde_json::Value::as_object)
+                .and_then(|value| value.get("source"))
+                .and_then(serde_json::Value::as_str),
+            Some("override")
+        );
+        assert!(body.get("generationConfig").is_none());
     }
 }
