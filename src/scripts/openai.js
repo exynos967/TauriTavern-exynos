@@ -495,7 +495,7 @@ const default_settings = {
     request_image_resolution: '',
     seed: -1,
     n: 1,
-    bind_preset_to_connection: true,
+    bind_preset_to_connection: false,
     extensions: {},
 };
 
@@ -4497,7 +4497,6 @@ function loadOpenAISettings(data, settings) {
     }
 
     $(`#settings_preset_openai option[value="${openai_setting_names[oai_settings.preset_settings_openai]}"]`).prop('selected', true);
-    $('#bind_preset_to_connection').prop('checked', oai_settings.bind_preset_to_connection);
     $('#openai_external_category').toggle(oai_settings.show_external_models);
     $('.reverse_proxy_warning').toggle(oai_settings.reverse_proxy !== '');
 
@@ -4685,14 +4684,35 @@ async function getStatusOpen() {
 /**
  * Get OpenAI preset body from settings
  * @param {ChatCompletionSettings} settings The settings object
+ * @param {object} options Options
+ * @param {boolean} [options.includeConnectionFields=false] Whether API connection fields are included
  * @returns {Object} The preset body object
  */
-export function getChatCompletionPreset(settings = oai_settings) {
+export function getChatCompletionPreset(settings = oai_settings, { includeConnectionFields = false } = {}) {
     const presetBody = {};
-    for (const [presetKey, [, settingsKey]] of Object.entries(settingsToUpdate)) {
+    for (const [presetKey, [, settingsKey, , isConnection]] of Object.entries(settingsToUpdate)) {
+        if (isConnection && !includeConnectionFields) {
+            continue;
+        }
         presetBody[presetKey] = settings[settingsKey];
     }
     return structuredClone(presetBody);
+}
+
+export function isOpenAIConnectionPresetField(presetKey) {
+    return Boolean(settingsToUpdate[presetKey]?.[3]);
+}
+
+export function stripOpenAIConnectionFieldsFromPreset(preset) {
+    const result = structuredClone(preset || {});
+
+    for (const presetKey of Object.keys(result)) {
+        if (isOpenAIConnectionPresetField(presetKey)) {
+            delete result[presetKey];
+        }
+    }
+
+    return result;
 }
 
 /**
@@ -4721,7 +4741,7 @@ async function saveOpenAIPreset(name, settings, triggerUi = true) {
         if (Object.keys(openai_setting_names).includes(data.name)) {
             oai_settings.preset_settings_openai = data.name;
             const value = openai_setting_names[data.name];
-            Object.assign(openai_settings[value], presetBody);
+            openai_settings[value] = structuredClone(presetBody);
             $(`#settings_preset_openai option[value="${value}"]`).prop('selected', true);
             if (triggerUi) $('#settings_preset_openai').trigger('change');
         }
@@ -4891,24 +4911,12 @@ async function onPresetImportFileChange(e) {
         return;
     }
 
-    const fields = sensitiveFields.filter(field => presetBody[field]).map(field => `<b>${field}</b>`);
+    const fields = sensitiveFields.filter(field => presetBody[field]);
     const shouldConfirm = fields.length > 0;
 
     if (shouldConfirm) {
-        const textHeader = 'The imported preset contains proxy and/or custom endpoint settings.';
-        const textMessage = fields.join('<br>');
-        const cancelButton = { text: 'Cancel import', result: POPUP_RESULT.CANCELLED, appendAtEnd: true };
-        const popupOptions = { customButtons: [cancelButton], okButton: 'Remove them', cancelButton: 'Import as-is' };
-        const popupResult = await Popup.show.confirm(textHeader, textMessage, popupOptions);
-
-        if (popupResult === POPUP_RESULT.CANCELLED) {
-            console.log('Import cancelled by user');
-            return;
-        }
-
-        if (popupResult === POPUP_RESULT.AFFIRMATIVE) {
-            sensitiveFields.forEach(field => delete presetBody[field]);
-        }
+        console.info('Removing API connection fields from imported OpenAI preset:', fields);
+        sensitiveFields.forEach(field => delete presetBody[field]);
     }
 
     if (name in openai_setting_names) {
@@ -4920,6 +4928,7 @@ async function onPresetImportFileChange(e) {
     }
 
     await eventSource.emit(event_types.OAI_PRESET_IMPORT_READY, { data: presetBody, presetName: name });
+    presetBody = stripOpenAIConnectionFieldsFromPreset(presetBody);
 
     const savePresetSettings = await fetch('/api/presets/save', {
         method: 'POST',
@@ -4941,7 +4950,7 @@ async function onPresetImportFileChange(e) {
     if (Object.keys(openai_setting_names).includes(data.name)) {
         oai_settings.preset_settings_openai = data.name;
         const value = openai_setting_names[data.name];
-        Object.assign(openai_settings[value], presetBody);
+        openai_settings[value] = structuredClone(presetBody);
         $(`#settings_preset_openai option[value="${value}"]`).prop('selected', true);
         $('#settings_preset_openai').trigger('change');
     } else {
@@ -4972,7 +4981,7 @@ async function onExportPresetClick() {
         return;
     }
 
-    const preset = structuredClone(openai_settings[openai_setting_names[oai_settings.preset_settings_openai]]);
+    const preset = stripOpenAIConnectionFieldsFromPreset(openai_settings[openai_setting_names[oai_settings.preset_settings_openai]]);
 
     const fieldValues = sensitiveFields.filter(field => preset[field]).map(field => `<b>${field}</b>: <code>${preset[field]}</code>`);
     if (fieldValues.length > 0) {
@@ -4997,9 +5006,9 @@ async function onExportPresetClick() {
 
     const removeConnectionData = exportConnectionTemplate.find('input[name="export_connection_data"]:checked').val() === 'false';
     if (removeConnectionData) {
-        for (const [, [, settingName, , isConnection]] of Object.entries(settingsToUpdate)) {
+        for (const [presetKey, [, , , isConnection]] of Object.entries(settingsToUpdate)) {
             if (isConnection) {
-                delete preset[settingName];
+                delete preset[presetKey];
             }
         }
     }
@@ -5144,12 +5153,8 @@ function onSettingsPresetChange() {
         savePreset: saveOpenAIPreset,
         presetNameBefore: presetNameBefore,
     }).finally(async () => {
-        if (oai_settings.bind_preset_to_connection) {
-            $('.model_custom_select').empty();
-        }
-
         for (const [key, [selector, setting, isCheckbox, isConnection]] of Object.entries(settingsToUpdate)) {
-            if (isConnection && !oai_settings.bind_preset_to_connection) {
+            if (isConnection) {
                 continue;
             }
 
@@ -5167,14 +5172,6 @@ function onSettingsPresetChange() {
                 }
                 oai_settings[setting] = preset[key];
             }
-        }
-
-        // These cannot be changed via preset if unbound to connection
-        if (oai_settings.bind_preset_to_connection) {
-            syncChatCompletionSourceSelector();
-            $('#chat_completion_source').trigger('change');
-            $('#openrouter_providers_chat').trigger('change');
-            $('#openrouter_quantizations_chat').trigger('change');
         }
 
         $('#openai_logit_bias_preset').trigger('change');
@@ -7318,11 +7315,6 @@ export function initOpenAI() {
 
         oai_settings.openrouter_quantizations = selectedQuantizations;
 
-        saveSettingsDebounced();
-    });
-
-    $('#bind_preset_to_connection').on('input', function () {
-        oai_settings.bind_preset_to_connection = !!$(this).prop('checked');
         saveSettingsDebounced();
     });
 
