@@ -1,8 +1,11 @@
 import { eventSource, event_types } from '../../../script.js';
+import { serializeSlowInteraction } from '../../tauri/perf/interaction-timing.js';
 
 const GLOBAL_KEY = '__TAURITAVERN_PERF_PROFILER__';
 const MAX_RECORDS = 20;
 const MAX_FRAME_SAMPLES = 600;
+const MAX_CHAT_LOADS = 20;
+const MAX_SLOW_INTERACTIONS = 100;
 
 const state = {
     capturing: false,
@@ -11,6 +14,9 @@ const state = {
     nextId: 1,
     observer: null,
     measureObserver: null,
+    interactionObserver: null,
+    chatLoads: [],
+    slowInteractions: [],
     rafId: null,
     lastFrameAt: null,
     panel: null,
@@ -53,6 +59,9 @@ function createRecord(type, dryRun) {
         endedAt: null,
         durationMs: null,
         finishReason: null,
+        generation: {
+            trace: null,
+        },
         worldInfo: {
             entriesLoadedAtMs: null,
             globalEntries: 0,
@@ -251,15 +260,7 @@ function installMeasureObserver() {
     try {
         state.measureObserver = new PerformanceObserver(list => {
             for (const entry of list.getEntries()) {
-                if (!['tt:world-info:total', 'tt:stream:total'].includes(entry.name)) {
-                    continue;
-                }
-
-                const record = [state.current, ...state.records.slice().reverse()]
-                    .find(candidate => candidate
-                        && candidate.startedAt <= entry.startTime
-                        && (candidate.endedAt === null || candidate.endedAt >= entry.startTime));
-                if (!record) {
+                if (!['tt:generation:total', 'tt:world-info:total', 'tt:stream:total', 'tt:chat-load:total'].includes(entry.name)) {
                     continue;
                 }
 
@@ -267,7 +268,30 @@ function installMeasureObserver() {
                     durationMs: finiteRound(entry.duration),
                     ...(entry.detail && typeof entry.detail === 'object' ? structuredClone(entry.detail) : {}),
                 };
-                if (entry.name === 'tt:world-info:total') {
+
+                if (entry.name === 'tt:chat-load:total') {
+                    state.chatLoads.push({
+                        startedAt: finiteRound(entry.startTime),
+                        ...trace,
+                    });
+                    if (state.chatLoads.length > MAX_CHAT_LOADS) {
+                        state.chatLoads.splice(0, state.chatLoads.length - MAX_CHAT_LOADS);
+                    }
+                    renderStatus();
+                    continue;
+                }
+
+                const record = [state.current, ...state.records.slice().reverse()]
+                    .find(candidate => candidate
+                        && candidate.startedAt <= entry.startTime + entry.duration
+                        && (candidate.endedAt === null || candidate.endedAt >= entry.startTime));
+                if (!record) {
+                    continue;
+                }
+
+                if (entry.name === 'tt:generation:total') {
+                    record.generation.trace = trace;
+                } else if (entry.name === 'tt:world-info:total') {
                     record.worldInfo.trace = trace;
                 } else {
                     record.stream.trace = trace;
@@ -281,6 +305,31 @@ function installMeasureObserver() {
     }
 }
 
+function installInteractionObserver() {
+    if (state.interactionObserver || typeof PerformanceObserver !== 'function') {
+        return;
+    }
+
+    try {
+        state.interactionObserver = new PerformanceObserver(list => {
+            for (const entry of list.getEntries()) {
+                const interaction = serializeSlowInteraction(entry);
+                if (!interaction) {
+                    continue;
+                }
+
+                state.slowInteractions.push(interaction);
+                if (state.slowInteractions.length > MAX_SLOW_INTERACTIONS) {
+                    state.slowInteractions.splice(0, state.slowInteractions.length - MAX_SLOW_INTERACTIONS);
+                }
+            }
+        });
+        state.interactionObserver.observe({ type: 'event', buffered: false, durationThreshold: 100 });
+    } catch {
+        state.interactionObserver = null;
+    }
+}
+
 function startCapture() {
     if (state.capturing) {
         return;
@@ -290,6 +339,7 @@ function startCapture() {
     state.lastFrameAt = null;
     installLongTaskObserver();
     installMeasureObserver();
+    installInteractionObserver();
     startFrameSampler();
     renderStatus();
 }
@@ -306,7 +356,7 @@ function stopCapture() {
 
 function snapshot() {
     return {
-        schemaVersion: 1,
+        schemaVersion: 2,
         exportedAt: new Date().toISOString(),
         userAgent: navigator.userAgent,
         viewport: {
@@ -316,6 +366,8 @@ function snapshot() {
         },
         current: state.current ? structuredClone(state.current) : null,
         records: structuredClone(state.records),
+        chatLoads: structuredClone(state.chatLoads),
+        slowInteractions: structuredClone(state.slowInteractions),
     };
 }
 
@@ -348,6 +400,8 @@ function renderStatus() {
     const duration = state.current ? now() - record.startedAt : record.durationMs;
     const worldInfoPhases = record.worldInfo.trace?.phases ?? {};
     const streamPhases = record.stream.trace?.phases ?? {};
+    const generationPhases = record.generation.trace?.phases ?? {};
+    const lastChatLoad = state.chatLoads.at(-1);
     state.status.innerHTML = `
         <div><b>${state.current ? '正在生成' : '最近一次'}</b> #${record.id} · ${record.type}</div>
         <div>总耗时：${formatMs(duration)}</div>
@@ -355,6 +409,8 @@ function renderStatus() {
         <div>载入：${formatMs(worldInfoPhases['entries-total']?.durationMs)} · 匹配：${formatMs(worldInfoPhases['entry-scan']?.durationMs)} · Token：${formatMs(worldInfoPhases['token-count']?.durationMs)}</div>
         <div>格式化：${formatMs(streamPhases['format-total']?.durationMs)} · DOM：${formatMs(streamPhases['dom-commit']?.durationMs)}</div>
         <div>首块：${formatMs(record.stream.firstChunkAtMs)} · 流块：${record.stream.chunks}</div>
+        <div>Prompt：${formatMs(generationPhases['prompt-assembly']?.durationMs)} · 请求：${formatMs(generationPhases['request-dispatch']?.durationMs ?? generationPhases['request-response']?.durationMs)}</div>
+        <div>聊天载入：${formatMs(lastChatLoad?.durationMs)} · 慢交互：${state.slowInteractions.length}</div>
         <div>长任务：${record.responsiveness.longTasks} 次 / ${formatMs(record.responsiveness.maxLongTaskMs)}</div>
     `;
 }
@@ -402,6 +458,8 @@ function createUi() {
     panel.querySelector('[data-action="export"]').addEventListener('click', downloadReport);
     panel.querySelector('[data-action="clear"]').addEventListener('click', () => {
         state.records = [];
+        state.chatLoads = [];
+        state.slowInteractions = [];
         renderStatus();
     });
 

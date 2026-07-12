@@ -5081,7 +5081,22 @@ function cleanupGenerationAfterUnhandledError(type, dryRun) {
     unblockGeneration(type);
 }
 
-async function GenerateInternal(type, { automatic_trigger, force_name2, quiet_prompt, quietToLoud, skipWIAN, force_chid, signal, quietImage, quietName, jsonSchema = null, depth = 0, agentMode = false, agentProfileId = null, agentContextPolicy = null, agentSystemPrompt = null } = {}, dryRun = false) {
+async function GenerateInternal(type, options = {}, dryRun = false) {
+    const perfTrace = createPerformanceTrace('tt:generation', {
+        type,
+        dryRun: Boolean(dryRun),
+    });
+    try {
+        const result = await GenerateInternalCore(type, options, dryRun, perfTrace);
+        perfTrace.finish({ success: true });
+        return result;
+    } catch (error) {
+        perfTrace.finish({ success: false });
+        throw error;
+    }
+}
+
+async function GenerateInternalCore(type, { automatic_trigger, force_name2, quiet_prompt, quietToLoud, skipWIAN, force_chid, signal, quietImage, quietName, jsonSchema = null, depth = 0, agentMode = false, agentProfileId = null, agentContextPolicy = null, agentSystemPrompt = null } = {}, dryRun = false, perfTrace = null) {
     console.log('Generate entered');
     setGenerationProgress(0);
     generation_started = new Date();
@@ -5089,10 +5104,10 @@ async function GenerateInternal(type, { automatic_trigger, force_name2, quiet_pr
     const resolvedAgentSystemPrompt = agentMode ? normalizeAgentSystemPrompt(agentSystemPrompt) : null;
 
     // Prevent generation from shallow characters
-    await unshallowCharacter(this_chid);
+    await perfTrace.measureAsync('character-load', () => unshallowCharacter(this_chid));
 
     // Occurs every time, even if the generation is aborted due to slash commands execution
-    await eventSource.emit(event_types.GENERATION_STARTED, type, { automatic_trigger, force_name2, quiet_prompt, quietToLoud, skipWIAN, force_chid, signal, quietImage }, dryRun);
+    await perfTrace.measureAsync('generation-start-listeners', () => eventSource.emit(event_types.GENERATION_STARTED, type, { automatic_trigger, force_name2, quiet_prompt, quietToLoud, skipWIAN, force_chid, signal, quietImage }, dryRun));
 
     // Don't recreate abort controller if signal is passed
     if (!(abortController && signal)) {
@@ -5104,7 +5119,7 @@ async function GenerateInternal(type, { automatic_trigger, force_name2, quiet_pr
     const isImpersonate = type == 'impersonate';
 
     if (!(dryRun || depth || type == 'regenerate' || type == 'swipe' || type == 'quiet')) {
-        const interruptedByCommand = await processCommands(String($('#send_textarea').val()));
+        const interruptedByCommand = await perfTrace.measureAsync('slash-commands', () => processCommands(String($('#send_textarea').val())));
 
         if (interruptedByCommand) {
             //$("#send_textarea").val('')[0].dispatchEvent(new Event('input', { bubbles:true }));
@@ -5114,7 +5129,7 @@ async function GenerateInternal(type, { automatic_trigger, force_name2, quiet_pr
     }
 
     // Occurs only if the generation is not aborted due to slash commands execution
-    await eventSource.emit(event_types.GENERATION_AFTER_COMMANDS, type, { automatic_trigger, force_name2, quiet_prompt, quietToLoud, skipWIAN, force_chid, signal, quietImage }, dryRun);
+    await perfTrace.measureAsync('after-commands-listeners', () => eventSource.emit(event_types.GENERATION_AFTER_COMMANDS, type, { automatic_trigger, force_name2, quiet_prompt, quietToLoud, skipWIAN, force_chid, signal, quietImage }, dryRun));
 
     if (main_api == 'kobold' && kai_settings.streaming_kobold && !kai_flags.can_use_streaming) {
         toastr.error(t`Streaming is enabled, but the version of Kobold used does not support token streaming.`, undefined, { timeOut: 10000, preventDuplicates: true });
@@ -5129,7 +5144,7 @@ async function GenerateInternal(type, { automatic_trigger, force_name2, quiet_pr
 
     if (!dryRun) {
         // Ping server to make sure it is still alive
-        const pingResult = await pingServer();
+        const pingResult = await perfTrace.measureAsync('server-ping', () => pingServer());
 
         if (!pingResult) {
             unblockGeneration(type);
@@ -5172,6 +5187,8 @@ async function GenerateInternal(type, { automatic_trigger, force_name2, quiet_pr
             return Promise.resolve();
         }
     }
+
+    const promptAssemblyStartedAt = perfTrace.start();
 
     //#########QUIET PROMPT STUFF##############
     //this function just gives special care to novel quiet instruction prompts
@@ -5348,11 +5365,11 @@ async function GenerateInternal(type, { automatic_trigger, force_name2, quiet_pr
         coreChat.pop();
     }
 
-    const coreChatRegexedMessages = await getRegexedStringBatchAsync(coreChat.map((/** @type {ChatMessage} */ chatItem, index) => ({
+    const coreChatRegexedMessages = await perfTrace.measureAsync('history-regex', () => getRegexedStringBatchAsync(coreChat.map((/** @type {ChatMessage} */ chatItem, index) => ({
         rawString: chatItem.mes,
         placement: chatItem.is_user ? regex_placement.USER_INPUT : regex_placement.AI_OUTPUT,
         params: { isPrompt: true, depth: (coreChat.length - index - (isContinue ? 2 : 1)) },
-    })));
+    }))));
 
     coreChat = await Promise.all(coreChat.map(async (/** @type {ChatMessage} */ chatItem, index) => {
         let regexedMessage = coreChatRegexedMessages[index];
@@ -5381,11 +5398,11 @@ async function GenerateInternal(type, { automatic_trigger, force_name2, quiet_pr
     }));
 
     const promptReasoning = new PromptReasoning();
-    const regexedReasoning = await getRegexedStringBatchAsync(coreChat.map((chatItem, index) => ({
+    const regexedReasoning = await perfTrace.measureAsync('reasoning-regex', () => getRegexedStringBatchAsync(coreChat.map((chatItem, index) => ({
         rawString: String(chatItem.extra?.reasoning ?? ''),
         placement: regex_placement.REASONING,
         params: { isPrompt: true, depth: coreChat.length - index - (isContinue ? 2 : 1) },
-    })));
+    }))));
 
     for (let i = coreChat.length - 1; i >= 0; i--) {
         const isPrefix = isContinue && i === coreChat.length - 1;
@@ -5411,7 +5428,7 @@ async function GenerateInternal(type, { automatic_trigger, force_name2, quiet_pr
 
     if (!dryRun) {
         console.debug('Running extension interceptors');
-        const aborted = await runGenerationInterceptors(coreChat, this_max_context, type);
+        const aborted = await perfTrace.measureAsync('extension-interceptors', () => runGenerationInterceptors(coreChat, this_max_context, type));
 
         if (aborted) {
             console.debug('Generation aborted by extension interceptors');
@@ -5484,7 +5501,7 @@ async function GenerateInternal(type, { automatic_trigger, force_name2, quiet_pr
         creatorNotes: creatorNotes,
         trigger: GENERATION_TYPE_TRIGGERS.includes(type) ? type : 'normal',
     };
-    const { worldInfoString, worldInfoBefore, worldInfoAfter, worldInfoExamples, worldInfoDepth, outletEntries, worldInfoActivation } = await getWorldInfoPrompt(chatForWI, this_max_context, dryRun, globalScanData);
+    const { worldInfoString, worldInfoBefore, worldInfoAfter, worldInfoExamples, worldInfoDepth, outletEntries, worldInfoActivation } = await perfTrace.measureAsync('world-info', () => getWorldInfoPrompt(chatForWI, this_max_context, dryRun, globalScanData));
     setExtensionPrompt(inject_ids.QUIET_PROMPT, '', extension_prompt_types.IN_PROMPT, 0, true);
     const includeActivatedWorldInfo = !agentMode || resolvedAgentContextPolicy.includeActivatedWorldInfo;
     const promptWorldInfoBefore = includeActivatedWorldInfo ? worldInfoBefore : '';
@@ -6199,7 +6216,8 @@ async function GenerateInternal(type, { automatic_trigger, force_name2, quiet_pr
         }
     }
 
-    await eventSource.emit(event_types.GENERATE_AFTER_DATA, generate_data, dryRun);
+    await perfTrace.measureAsync('after-data-listeners', () => eventSource.emit(event_types.GENERATE_AFTER_DATA, generate_data, dryRun));
+    perfTrace.end('prompt-assembly', promptAssemblyStartedAt);
 
     if (dryRun) {
         return Promise.resolve();
@@ -6279,7 +6297,7 @@ async function GenerateInternal(type, { automatic_trigger, force_name2, quiet_pr
                 streamingProcessor.firstMessageText = '';
             }
 
-            streamingProcessor.generator = await sendStreamingRequest(type, generate_data, { jsonSchema });
+            streamingProcessor.generator = await perfTrace.measureAsync('request-dispatch', () => sendStreamingRequest(type, generate_data, { jsonSchema }));
 
             hideSwipeButtons();
             let getMessage = await streamingProcessor.generate();
@@ -6337,7 +6355,7 @@ async function GenerateInternal(type, { automatic_trigger, force_name2, quiet_pr
                 });
             }
         } else {
-            return await sendGenerationRequest(type, generate_data, { jsonSchema });
+            return await perfTrace.measureAsync('request-response', () => sendGenerationRequest(type, generate_data, { jsonSchema }));
         }
     }
 
@@ -8852,29 +8870,33 @@ export async function getChat({ allowNewChat = false } = {}) {
     const startedSelectedGroup = selected_group;
     const startedCharacter = startedChid !== undefined ? characters[startedChid] : null;
     const startedChatFile = startedCharacter?.chat;
+    const perfTrace = createPerformanceTrace('tt:chat-load', {
+        allowNewChat: Boolean(allowNewChat),
+        transport: isTauriChatPayloadTransportEnabled() ? 'tauri' : 'http',
+    });
 
     try {
-        await unshallowCharacter(startedChid);
+        await perfTrace.measureAsync('character-load', () => unshallowCharacter(startedChid));
         const usePayloadTransport = isTauriChatPayloadTransportEnabled();
         let data;
         let windowedCursor = null;
         let windowedHasMoreBefore = false;
 
         if (usePayloadTransport) {
-            const window = await loadCharacterChatPayloadTail({
+            const window = await perfTrace.measureAsync('payload-read', () => loadCharacterChatPayloadTail({
                 characterName: startedCharacter?.name,
                 avatarUrl: startedCharacter?.avatar,
                 fileName: startedChatFile,
                 maxLines: DEFAULT_CHAT_WINDOW_LINES,
                 allowNotFound: allowNewChat,
-            });
+            }));
 
             data = window.payload;
             windowedCursor = window.cursor ?? null;
             windowedHasMoreBefore = Boolean(window.hasMoreBefore);
         } else {
             clearWindowedChatState();
-            const response = await fetch('/api/chats/get', {
+            const response = await perfTrace.measureAsync('payload-read', () => fetch('/api/chats/get', {
                 method: 'POST',
                 headers: getRequestHeaders(),
                 cache: 'no-cache',
@@ -8884,13 +8906,13 @@ export async function getChat({ allowNewChat = false } = {}) {
                     avatar_url: startedCharacter?.avatar,
                     allow_not_found: allowNewChat,
                 }),
-            });
+            }));
 
             if (!response.ok) {
                 throw new Error('Chat could not be loaded');
             }
 
-            data = await response.json();
+            data = await perfTrace.measureAsync('payload-parse', () => response.json());
         }
 
         const currentCharacter = startedChid !== undefined ? characters[startedChid] : null;
@@ -8898,21 +8920,11 @@ export async function getChat({ allowNewChat = false } = {}) {
             && startedChid === this_chid
             && currentCharacter?.chat === startedChatFile;
         if (!stillActive) {
+            perfTrace.finish({ success: false, stale: true, messages: chat.length });
             return;
         }
 
-        if (Array.isArray(data) && data.length > 0) {
-            /** @type {ChatHeader} */
-            const chatHeader = data.shift();
-            chat_metadata = chatHeader?.chat_metadata ?? {};
-            chat.splice(0, chat.length, ...data);
-            chat.forEach(ensureMessageMediaIsArray);
-        } else if (allowNewChat) {
-            chat.splice(0, chat.length);
-            chat_metadata = {};
-        } else {
-            throw new Error('Chat payload is empty');
-        }
+        perfTrace.measure('payload-apply', () => applyCharacterChatPayload(data, allowNewChat));
 
         if (usePayloadTransport && windowedCursor) {
             setWindowedChatState({
@@ -8931,8 +8943,9 @@ export async function getChat({ allowNewChat = false } = {}) {
         if (!chat_metadata.integrity) {
             chat_metadata.integrity = uuidv4();
         }
-        await getChatResult({ allowNewChat });
+        await getChatResult({ allowNewChat }, perfTrace);
         eventSource.emit(event_types.CHAT_LOADED, { detail: { id: this_chid, character: characters[this_chid] } });
+        perfTrace.finish({ success: true, messages: chat.length });
 
         // Focus on the textarea if not already focused on a visible text input
         delay(debounce_timeout.short).then(() => {
@@ -8947,16 +8960,33 @@ export async function getChat({ allowNewChat = false } = {}) {
             && startedChid === this_chid
             && currentCharacter?.chat === startedChatFile;
         if (!stillActive) {
+            perfTrace.finish({ success: false, stale: true, messages: chat.length });
             return;
         }
 
         console.error(error);
         toastr.error(t`Chat could not be loaded.`, t`Chat Load Failed`);
+        perfTrace.finish({ success: false, messages: chat.length });
         throw error;
     }
 }
 
-async function getChatResult({ allowNewChat = false } = {}) {
+function applyCharacterChatPayload(data, allowNewChat) {
+    if (Array.isArray(data) && data.length > 0) {
+        /** @type {ChatHeader} */
+        const chatHeader = data.shift();
+        chat_metadata = chatHeader?.chat_metadata ?? {};
+        chat.splice(0, chat.length, ...data);
+        chat.forEach(ensureMessageMediaIsArray);
+    } else if (allowNewChat) {
+        chat.splice(0, chat.length);
+        chat_metadata = {};
+    } else {
+        throw new Error('Chat payload is empty');
+    }
+}
+
+async function getChatResult({ allowNewChat = false } = {}, perfTrace = null) {
     name2 = characters[this_chid].name;
     let freshChat = false;
     if (allowNewChat && chat.length === 0) {
@@ -8968,11 +8998,11 @@ async function getChatResult({ allowNewChat = false } = {}) {
         // Make sure the chat appears on the server
         await saveChatConditional();
     }
-    await loadItemizedPrompts(getCurrentChatId());
-    await printMessages();
+    await perfTrace.measureAsync('itemized-prompts-load', () => loadItemizedPrompts(getCurrentChatId()));
+    await perfTrace.measureAsync('messages-render', () => printMessages());
     select_selected_character(this_chid);
 
-    await eventSource.emit(event_types.CHAT_CHANGED, (getCurrentChatId()));
+    await perfTrace.measureAsync('chat-changed-listeners', () => eventSource.emit(event_types.CHAT_CHANGED, (getCurrentChatId())));
     if (freshChat) await eventSource.emit(event_types.CHAT_CREATED);
 
     if (chat.length === 1) {

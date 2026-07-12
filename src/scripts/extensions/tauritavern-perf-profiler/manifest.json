@@ -6,8 +6,8 @@
     "js": "index.js",
     "css": "style.css",
     "author": "TauriTavern",
-    "version": "0.1.0",
-    "description": "Local performance diagnostics for world-info scanning and streamed generation.",
+    "version": "0.2.0",
+    "description": "Local performance diagnostics for generation, chat loading, interactions, world info, and streaming.",
     "hooks": {
         "activate": "init"
     }
