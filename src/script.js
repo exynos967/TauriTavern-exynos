@@ -15,7 +15,7 @@ import { replaceMesTextHtmlWithRuntimePolicy } from './scripts/tauri/message/mes
 import { getCodeHighlightCoordinator } from './scripts/tauri/perf/code-highlight-coordinator.js';
 import { isInlineDrawerContentOpen, setInlineDrawerContentOpen } from './scripts/tauri/perf/inline-drawer-motion.js';
 import { createPerformanceTrace } from './scripts/tauri/perf/performance-trace.js';
-import { getMessageRenderBatches, shouldFollowStreamingOutput } from './scripts/tauri/perf/message-render-batches.js';
+import { getMessageRenderBatches, isChatViewportAtBottom } from './scripts/tauri/perf/message-render-batches.js';
 import { getStreamingRenderInterval } from './scripts/tauri/perf/streaming-render-policy.js';
 import {
     isTauriChatPayloadTransportEnabled,
@@ -2303,6 +2303,11 @@ export async function sendTextareaMessage() {
     if (is_send_press) return;
     if (isExecutingCommandsFromChatInput) return;
 
+    const followStreamingOutput = isChatViewportAtBottom(chatElement[0]);
+    if (!followStreamingOutput) {
+        cancelPendingChatScroll();
+    }
+
     hideSwipeButtons(); //Swipe buttons must be hidden now, otherwise concurrent generations are possible.
 
     let routeToAgentMode = false;
@@ -2336,7 +2341,7 @@ export async function sendTextareaMessage() {
             await newAssistantChat({ temporary: false });
         }
 
-        return await Generate(generateType, agentOptions);
+        return await Generate(generateType, { ...agentOptions, followStreamingOutput });
     } catch (error) {
         const message = agentErrorMessage(error);
         if (routeToAgentMode || message.startsWith('agent.')) {
@@ -3431,6 +3436,13 @@ function formatGenerationTimer(gen_started, gen_finished, tokenCount, reasoningD
 
 let requestId = null;
 
+function cancelPendingChatScroll() {
+    if (requestId !== null) {
+        cancelAnimationFrame(requestId);
+        requestId = null;
+    }
+}
+
 /**
  * Scrolls the chat to the bottom if configured to do so.
  * @param {object} [options] Options
@@ -3457,9 +3469,7 @@ export function scrollChatToBottom({ waitForFrame } = {}) {
     };
 
     // Do not check truthiness. requestId can loop to zero.
-    if (requestId !== null) {
-        cancelAnimationFrame(requestId);
-    }
+    cancelPendingChatScroll();
 
     if (!waitForFrame) {
         doScroll();
@@ -4281,8 +4291,9 @@ class StreamingProcessor {
      * @param {Date} timeStarted Date when generation was started
      * @param {string} continueMessage Previous message if the type is 'continue'
      * @param {PromptReasoning} promptReasoning Prompt reasoning instance
+     * @param {boolean} followStreamingOutput Whether this generation should follow new output
      */
-    constructor(type, forceName2, timeStarted, continueMessage, promptReasoning) {
+    constructor(type, forceName2, timeStarted, continueMessage, promptReasoning, followStreamingOutput = true) {
         this.result = '';
         this.messageId = -1;
         /** @type {HTMLElement} */
@@ -4307,6 +4318,7 @@ class StreamingProcessor {
         this.timeToFirstToken = null;
         this.createdAt = new Date();
         this.continueMessage = type === 'continue' ? continueMessage : '';
+        this.followStreamingOutput = followStreamingOutput;
         this.swipes = [];
         /** @type {import('./scripts/logprobs.js').TokenLogprobs[]} */
         this.messageLogprobs = [];
@@ -4371,7 +4383,7 @@ class StreamingProcessor {
         unblockGeneration();
     }
 
-    async onStartStreaming(text, followStreamingOutput = true) {
+    async onStartStreaming(text) {
         const continueOnReasoning = !!(this.type === 'continue' && this.promptReasoning.prefixReasoning);
         if (continueOnReasoning) {
             this.reasoningHandler.initContinue(this.promptReasoning);
@@ -4383,13 +4395,13 @@ class StreamingProcessor {
             this.sendTextarea.value = '';
             this.sendTextarea.dispatchEvent(new Event('input', { bubbles: true }));
         } else {
-            await saveReply({ type: this.type, getMessage: text, fromStreaming: true });
+            await saveReply({ type: this.type, getMessage: text, fromStreaming: true, scroll: this.followStreamingOutput });
             messageId = chat.length - 1;
             await this.#checkDomElements(messageId, continueOnReasoning);
             this.markUIGenStarted();
         }
         hideSwipeButtons({ hideCounters: true });
-        if (followStreamingOutput) {
+        if (this.followStreamingOutput) {
             scrollChatToBottom({ waitForFrame: true });
         }
         return messageId;
@@ -4499,7 +4511,7 @@ class StreamingProcessor {
             this.setFirstSwipe(messageId);
         }
 
-        if (!scrollLock) {
+        if (this.followStreamingOutput && !scrollLock) {
             this.perfTrace.measure('scroll-schedule', () => scrollChatToBottom({ waitForFrame: true }));
         }
     }
@@ -4629,8 +4641,7 @@ class StreamingProcessor {
 
     async generate() {
         if (this.messageId == -1) {
-            const followStreamingOutput = shouldFollowStreamingOutput(scrollLock);
-            this.messageId = await this.onStartStreaming(this.firstMessageText, followStreamingOutput);
+            this.messageId = await this.onStartStreaming(this.firstMessageText);
             await delay(1); // delay for message to be rendered
         }
 
@@ -5137,7 +5148,7 @@ async function GenerateInternal(type, options = {}, dryRun = false) {
     }
 }
 
-async function GenerateInternalCore(type, { automatic_trigger, force_name2, quiet_prompt, quietToLoud, skipWIAN, force_chid, signal, quietImage, quietName, jsonSchema = null, depth = 0, agentMode = false, agentProfileId = null, agentContextPolicy = null, agentSystemPrompt = null } = {}, dryRun = false, perfTrace = null) {
+async function GenerateInternalCore(type, { automatic_trigger, force_name2, quiet_prompt, quietToLoud, skipWIAN, force_chid, signal, quietImage, quietName, jsonSchema = null, depth = 0, agentMode = false, agentProfileId = null, agentContextPolicy = null, agentSystemPrompt = null, followStreamingOutput = !scrollLock } = {}, dryRun = false, perfTrace = null) {
     console.log('Generate entered');
     setGenerationProgress(0);
     generation_started = new Date();
@@ -5310,11 +5321,11 @@ async function GenerateInternalCore(type, { automatic_trigger, force_name2, quie
         if (messageBias && !removeMacros(textareaText)) {
             sendSystemMessage(system_message_types.GENERIC, ' ', { bias: messageBias });
         } else {
-            await sendMessageAsUser(textareaText, messageBias);
+            await sendMessageAsUser(textareaText, messageBias, null, false, undefined, undefined, followStreamingOutput);
         }
     } else if (textareaText == '' && !automatic_trigger && !dryRun && [undefined, 'normal'].includes(type) && main_api == 'openai' && oai_settings.send_if_empty.trim().length > 0 && !depth) {
         // Use send_if_empty if set and the user message is empty. Only when sending messages normally
-        await sendMessageAsUser(oai_settings.send_if_empty.trim(), messageBias);
+        await sendMessageAsUser(oai_settings.send_if_empty.trim(), messageBias, null, false, undefined, undefined, followStreamingOutput);
     }
 
     let {
@@ -6341,7 +6352,7 @@ async function GenerateInternalCore(type, { automatic_trigger, force_name2, quie
 
         if (isStreamingEnabled() && type !== 'quiet') {
             continue_mag = promptReasoning.removePrefix(continue_mag);
-            streamingProcessor = new StreamingProcessor(type, force_name2, generation_started, continue_mag, promptReasoning);
+            streamingProcessor = new StreamingProcessor(type, force_name2, generation_started, continue_mag, promptReasoning, followStreamingOutput);
             if (isContinue) {
                 // Save reply does add cycle text to the prompt, so it's not needed here
                 streamingProcessor.firstMessageText = '';
@@ -6391,7 +6402,7 @@ async function GenerateInternalCore(type, { automatic_trigger, force_name2, quie
                     streamingProcessor = null;
                     depth = depth + 1;
                     await ToolManager.saveFunctionToolInvocations(invocationResult.invocations, native, reasoningContent);
-                    return Generate('normal', { automatic_trigger, force_name2, quiet_prompt, quietToLoud, skipWIAN, force_chid, signal, quietImage, quietName, depth }, dryRun);
+                    return Generate('normal', { automatic_trigger, force_name2, quiet_prompt, quietToLoud, skipWIAN, force_chid, signal, quietImage, quietName, depth, followStreamingOutput }, dryRun);
                 }
             }
 
@@ -6506,9 +6517,9 @@ async function GenerateInternalCore(type, { automatic_trigger, force_name2, quie
         } else {
             // Without streaming we'll be having a full message on continuation. Treat it as a last chunk.
             if (originalType !== 'continue') {
-                ({ type, getMessage } = await saveReply({ type, getMessage, title, swipes, reasoning, imageUrls, reasoningSignature, native }));
+                ({ type, getMessage } = await saveReply({ type, getMessage, title, swipes, reasoning, imageUrls, reasoningSignature, native, scroll: followStreamingOutput }));
             } else {
-                ({ type, getMessage } = await saveReply({ type: 'appendFinal', getMessage, title, swipes, reasoning, imageUrls, reasoningSignature, native }));
+                ({ type, getMessage } = await saveReply({ type: 'appendFinal', getMessage, title, swipes, reasoning, imageUrls, reasoningSignature, native, scroll: followStreamingOutput }));
             }
 
             // This relies on `saveReply` having been called to add the message to the chat, so it must be last.
@@ -6532,7 +6543,7 @@ async function GenerateInternalCore(type, { automatic_trigger, force_name2, quie
 
                 depth = depth + 1;
                 await ToolManager.saveFunctionToolInvocations(invocationResult.invocations, native, toolReasoning);
-                return Generate('normal', { automatic_trigger, force_name2, quiet_prompt, quietToLoud, skipWIAN, force_chid, signal, quietImage, quietName, depth }, dryRun);
+                return Generate('normal', { automatic_trigger, force_name2, quiet_prompt, quietToLoud, skipWIAN, force_chid, signal, quietImage, quietName, depth, followStreamingOutput }, dryRun);
             }
         }
 
@@ -7017,7 +7028,7 @@ export function removeMacros(str) {
  * @param {string} [avatar] Avatar of the user sending the message. Defaults to user_avatar.
  * @returns {Promise<any>} A promise that resolves to the message when it is inserted.
  */
-export async function sendMessageAsUser(messageText, messageBias, insertAt = null, compact = false, name = name1, avatar = user_avatar) {
+export async function sendMessageAsUser(messageText, messageBias, insertAt = null, compact = false, name = name1, avatar = user_avatar, scroll = true) {
     messageText = getRegexedString(messageText, regex_placement.USER_INPUT);
 
     const message = {
@@ -7062,7 +7073,7 @@ export async function sendMessageAsUser(messageText, messageBias, insertAt = nul
         await saveChatConditional();
         const chat_id = (chat.length - 1);
         await eventSource.emit(event_types.MESSAGE_SENT, chat_id);
-        addOneMessage(message, { scroll: !scrollLock });
+        addOneMessage(message, { scroll });
         await eventSource.emit(event_types.USER_MESSAGE_RENDERED, chat_id);
     }
 
@@ -7795,7 +7806,7 @@ async function processImageAttachment(message, { imageUrls }) {
  * @property {string} type Type of generation
  * @property {string} getMessage Generated message
  */
-export async function saveReply({ type, getMessage, fromStreaming = false, title = '', swipes = [], reasoning = '', imageUrls = [], reasoningSignature = null, native = null }) {
+export async function saveReply({ type, getMessage, fromStreaming = false, title = '', swipes = [], reasoning = '', imageUrls = [], reasoningSignature = null, native = null, scroll = !scrollLock }) {
     // Backward compatibility
     if (arguments.length > 1 && typeof arguments[0] !== 'object') {
         console.trace('saveReply called with positional arguments. Please use an object instead.');
@@ -7848,7 +7859,7 @@ export async function saveReply({ type, getMessage, fromStreaming = false, title
             }
             const chat_id = (chat.length - 1);
             !fromStreaming && await eventSource.emit(event_types.MESSAGE_RECEIVED, chat_id, type);
-            addOneMessage(chat[chat_id], { type: 'swipe', scroll: !scrollLock });
+            addOneMessage(chat[chat_id], { type: 'swipe', scroll });
             !fromStreaming && await eventSource.emit(event_types.CHARACTER_MESSAGE_RENDERED, chat_id, type);
         } else {
             lastMessage.mes = getMessage;
@@ -7876,7 +7887,7 @@ export async function saveReply({ type, getMessage, fromStreaming = false, title
         }
         const chat_id = (chat.length - 1);
         !fromStreaming && await eventSource.emit(event_types.MESSAGE_RECEIVED, chat_id, type);
-        addOneMessage(chat[chat_id], { type: 'swipe', scroll: !scrollLock });
+        addOneMessage(chat[chat_id], { type: 'swipe', scroll });
         !fromStreaming && await eventSource.emit(event_types.CHARACTER_MESSAGE_RENDERED, chat_id, type);
     } else if (type === 'appendFinal') {
         oldMessage = lastMessage.mes;
@@ -7901,7 +7912,7 @@ export async function saveReply({ type, getMessage, fromStreaming = false, title
         }
         const chat_id = (chat.length - 1);
         !fromStreaming && await eventSource.emit(event_types.MESSAGE_RECEIVED, chat_id, type);
-        addOneMessage(chat[chat_id], { type: 'swipe', scroll: !scrollLock });
+        addOneMessage(chat[chat_id], { type: 'swipe', scroll });
         !fromStreaming && await eventSource.emit(event_types.CHARACTER_MESSAGE_RENDERED, chat_id, type);
     } else {
         console.debug('entering chat update routine for non-swipe post');
@@ -7947,7 +7958,7 @@ export async function saveReply({ type, getMessage, fromStreaming = false, title
         const chat_id = (chat.length - 1);
 
         !fromStreaming && await eventSource.emit(event_types.MESSAGE_RECEIVED, chat_id, type);
-        addOneMessage(chat[chat_id], { scroll: !scrollLock });
+        addOneMessage(chat[chat_id], { scroll });
         !fromStreaming && await eventSource.emit(event_types.CHARACTER_MESSAGE_RENDERED, chat_id, type);
     }
 
@@ -13150,6 +13161,7 @@ jQuery(async function () {
         // Cancel autoscroll if the user scrolls up
         if (!scrollLock && !scrollIsAtBottom) {
             scrollLock = true;
+            cancelPendingChatScroll();
         }
     };
     chatElementScroll.addEventListener('scroll', chatScrollHandler, { passive: true });

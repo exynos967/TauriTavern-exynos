@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url';
 
 import {
     getMessageRenderBatches,
-    shouldFollowStreamingOutput,
+    isChatViewportAtBottom,
 } from '../src/scripts/tauri/perf/message-render-batches.js';
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -20,17 +20,20 @@ test('message prepend rendering is split into stable contiguous batches', () => 
     assert.deepEqual(getMessageRenderBatches(0), []);
 });
 
-test('streaming follows output only when the user has not locked scrolling', () => {
-    assert.equal(shouldFollowStreamingOutput(false), true);
-    assert.equal(shouldFollowStreamingOutput(true), false);
+test('chat viewport bottom detection tolerates only a small rounding gap', () => {
+    assert.equal(isChatViewportAtBottom({ scrollHeight: 1000, clientHeight: 400, scrollTop: 598 }), true);
+    assert.equal(isChatViewportAtBottom({ scrollHeight: 1000, clientHeight: 400, scrollTop: 590 }), false);
 });
 
-test('message insertion and streaming startup preserve an active scroll lock', async () => {
+test('message insertion and generation preserve the send-time viewport intent', async () => {
     const source = await readFile(path.join(REPO_ROOT, 'src/script.js'), 'utf8');
-    const generateStart = source.indexOf('async generate()');
 
-    assert.ok(generateStart >= 0);
-    assert.match(source, /addOneMessage\(message, \{ scroll: !scrollLock \}\)/);
-    assert.match(source, /this\.onStartStreaming\(this\.firstMessageText, followStreamingOutput\)/);
-    assert.doesNotMatch(source.slice(generateStart, generateStart + 700), /scrollLock\s*=\s*false/);
+    assert.match(source, /const followStreamingOutput = isChatViewportAtBottom\(chatElement\[0\]\)/);
+    assert.match(source, /Generate\(generateType, \{ \.\.\.agentOptions, followStreamingOutput \}\)/);
+    assert.match(source, /if \(!followStreamingOutput\) \{\s*cancelPendingChatScroll\(\)/);
+    assert.match(source, /new StreamingProcessor\([^;]+followStreamingOutput\)/);
+    assert.match(source, /saveReply\(\{[^}]+scroll: followStreamingOutput/s);
+    assert.match(source, /addOneMessage\(message, \{ scroll \}\)/);
+    assert.doesNotMatch(source, /shouldFollowStreamingOutput/);
+    assert.match(source, /scrollLock = true;\s*cancelPendingChatScroll\(\)/);
 });
