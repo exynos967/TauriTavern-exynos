@@ -8915,7 +8915,6 @@ export async function getChat({ allowNewChat = false } = {}) {
             && startedChid === this_chid
             && currentCharacter?.chat === startedChatFile;
         if (!stillActive) {
-            perfTrace.finish({ success: false, stale: true, messages: chat.length });
             return;
         }
 
@@ -8955,7 +8954,6 @@ export async function getChat({ allowNewChat = false } = {}) {
             && startedChid === this_chid
             && currentCharacter?.chat === startedChatFile;
         if (!stillActive) {
-            perfTrace.finish({ success: false, stale: true, messages: chat.length });
             return;
         }
 
