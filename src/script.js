@@ -14,6 +14,7 @@ import { SILLYTAVERN_COMPAT_VERSION } from './compat-version.js';
 import { replaceMesTextHtmlWithRuntimePolicy } from './scripts/tauri/message/mes-text-write.js';
 import { getCodeHighlightCoordinator } from './scripts/tauri/perf/code-highlight-coordinator.js';
 import { isInlineDrawerContentOpen, setInlineDrawerContentOpen } from './scripts/tauri/perf/inline-drawer-motion.js';
+import { createPerformanceTrace } from './scripts/tauri/perf/performance-trace.js';
 import {
     isTauriChatPayloadTransportEnabled,
     loadCharacterChatPayload,
@@ -2446,19 +2447,22 @@ export function messageFormatting(mes, ch_name, isSystem, isUser, messageId, san
         mes = mes.slice(replacedPromptBias.length);
     }
 
+    const perfTrace = formattingOptions?.perfTrace;
     if (!isSystem && !formattingOptions?.skipRegex) {
         const { placement: regexPlacement, depth } = getMessageFormattingRegexContext(isUser, messageId, isReasoning);
 
         // Always override the character name
-        mes = getRegexedString(mes, regexPlacement, {
+        const applyRegex = () => getRegexedString(mes, regexPlacement, {
             characterOverride: ch_name,
             isMarkdown: true,
             depth: depth,
         });
+        mes = perfTrace ? perfTrace.measure('format-regex', applyRegex) : applyRegex();
     }
 
     if (power_user.auto_fix_generated_markdown) {
-        mes = fixMarkdown(mes, true);
+        const fixGeneratedMarkdown = () => fixMarkdown(mes, true);
+        mes = perfTrace ? perfTrace.measure('format-markdown-fix', fixGeneratedMarkdown) : fixGeneratedMarkdown();
     }
 
     if (!isSystem && power_user.encode_tags) {
@@ -2478,6 +2482,7 @@ export function messageFormatting(mes, ch_name, isSystem, isUser, messageId, san
         }
     });
 
+    const markdownStartedAt = perfTrace?.start();
     if (!isSystem) {
         // Save double quotes in tags as a special character to prevent them from being encoded
         if (!power_user.encode_tags) {
@@ -2534,6 +2539,9 @@ export function messageFormatting(mes, ch_name, isSystem, isUser, messageId, san
             return match.replace(/&amp;/g, '&');
         });
     }
+    if (perfTrace) {
+        perfTrace.end('format-markdown', markdownStartedAt);
+    }
 
     if (!power_user.allow_name2_display && ch_name && !isUser && !isSystem) {
         mes = mes.replace(new RegExp(`(^|\n)${escapeRegex(ch_name)}:`, 'g'), '$1');
@@ -2548,9 +2556,12 @@ export function messageFormatting(mes, ch_name, isSystem, isUser, messageId, san
         ADD_TAGS: ['custom-style'],
         ...sanitizerOverrides,
     };
-    mes = encodeStyleTags(mes);
-    mes = DOMPurify.sanitize(mes, config);
-    mes = decodeStyleTags(mes, { prefix: '.mes_text ' });
+    const sanitize = () => {
+        let sanitized = encodeStyleTags(mes);
+        sanitized = DOMPurify.sanitize(sanitized, config);
+        return decodeStyleTags(sanitized, { prefix: '.mes_text ' });
+    };
+    mes = perfTrace ? perfTrace.measure('format-sanitize', sanitize) : sanitize();
 
     return mes;
 }
@@ -4270,6 +4281,21 @@ class StreamingProcessor {
         this.reasoningSignature = null;
         /** @type {any?} */
         this.native = null;
+        this.perfTrace = createPerformanceTrace('tt:stream', { type });
+        this.perfTraceFinished = false;
+    }
+
+    finishPerfTrace(reason, success = true) {
+        if (this.perfTraceFinished) {
+            return;
+        }
+
+        this.perfTraceFinished = true;
+        this.perfTrace.finish({
+            reason,
+            success,
+            outputChars: this.result.length,
+        });
     }
 
     /**
@@ -4330,6 +4356,7 @@ class StreamingProcessor {
     async onProgressStreaming(messageId, text, isFinal) {
         const isImpersonate = this.type == 'impersonate';
         const isContinue = this.type == 'continue';
+        const cleanupStartedAt = this.perfTrace.start();
 
         if (!isImpersonate && !isContinue && Array.isArray(this.swipes) && this.swipes.length > 0) {
             for (let i = 0; i < this.swipes.length; i++) {
@@ -4350,6 +4377,7 @@ class StreamingProcessor {
             displayIncompleteSentences: !isFinal,
             stoppingStrings: this.stoppingStrings,
         });
+        this.perfTrace.end('cleanup', cleanupStartedAt);
 
         const charsToBalance = ['*', '"', '```', '~~~'];
         for (const char of charsToBalance) {
@@ -4377,7 +4405,7 @@ class StreamingProcessor {
             chat[messageId].extra.time_to_first_token = this.timeToFirstToken;
 
             // Update reasoning
-            await this.reasoningHandler.process(messageId, mesChanged, this.promptReasoning);
+            await this.perfTrace.measureAsync('reasoning-update', () => this.reasoningHandler.process(messageId, mesChanged, this.promptReasoning));
             processedText = chat[messageId].mes;
 
             // Token count update.
@@ -4400,7 +4428,7 @@ class StreamingProcessor {
                 };
             }
 
-            const formattedText = messageFormatting(
+            const formattedText = this.perfTrace.measure('format-total', () => messageFormatting(
                 processedText,
                 chat[messageId].name,
                 chat[messageId].is_system,
@@ -4408,13 +4436,16 @@ class StreamingProcessor {
                 messageId,
                 {},
                 false,
-            );
+                { perfTrace: this.perfTrace },
+            ));
             if (this.messageTextDom instanceof HTMLElement) {
-                if (power_user.stream_fade_in) {
-                    applyStreamFadeIn(this.messageTextDom, formattedText);
-                } else {
-                    this.messageTextDom.innerHTML = formattedText;
-                }
+                this.perfTrace.measure('dom-commit', () => {
+                    if (power_user.stream_fade_in) {
+                        applyStreamFadeIn(this.messageTextDom, formattedText);
+                    } else {
+                        this.messageTextDom.innerHTML = formattedText;
+                    }
+                });
             }
 
             const timePassed = formatGenerationTimer(this.timeStarted, currentTime, currentTokenCount, this.reasoningHandler.getDuration(), this.timeToFirstToken);
@@ -4427,7 +4458,7 @@ class StreamingProcessor {
         }
 
         if (!scrollLock) {
-            scrollChatToBottom({ waitForFrame: true });
+            this.perfTrace.measure('scroll-schedule', () => scrollChatToBottom({ waitForFrame: true }));
         }
     }
 
@@ -4495,10 +4526,14 @@ class StreamingProcessor {
         }
 
         updateSwipeCounter(messageId, { message, messageElement });
+        if (!unlockUI) {
+            this.finishPerfTrace('tool-call');
+        }
     }
 
     async onFinishStreaming(messageId, text) {
         await this.finalizeIntermediaryMessage(messageId, text, { unlockUI: true });
+        this.finishPerfTrace('completed');
 
         const isAborted = this.abortController.signal.aborted;
         if (!isAborted && power_user.auto_swipe && generatedTextFiltered(text)) {
@@ -4520,6 +4555,7 @@ class StreamingProcessor {
             eventSource.emit(event_types.MESSAGE_RECEIVED, this.messageId, this.type);
             eventSource.emit(event_types.CHARACTER_MESSAGE_RENDERED, this.messageId, this.type);
         }
+        this.finishPerfTrace('error', false);
     }
 
     setFirstSwipe(messageId) {
@@ -4539,6 +4575,7 @@ class StreamingProcessor {
     onStopStreaming() {
         this.abortController.abort();
         this.isFinished = true;
+        this.finishPerfTrace('stopped', false);
     }
 
     /**
@@ -4585,7 +4622,7 @@ class StreamingProcessor {
                 this.images = state?.images ?? [];
                 this.reasoningSignature = state?.signature ?? null;
                 this.native = state?.native ?? null;
-                await eventSource.emit(event_types.STREAM_TOKEN_RECEIVED, text);
+                await this.perfTrace.measureAsync('token-event-listeners', () => eventSource.emit(event_types.STREAM_TOKEN_RECEIVED, text));
                 await sw.tick(async () => await this.onProgressStreaming(this.messageId, this.continueMessage + text));
             }
             const seconds = (timestamps[timestamps.length - 1] - timestamps[0]) / 1000;

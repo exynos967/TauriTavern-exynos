@@ -25,6 +25,7 @@ import { t } from './i18n.js';
 import { accountStorage } from './util/AccountStorage.js';
 import { getOrCreatePersonaDescriptor, setPersonaDescription, user_avatar } from './personas.js';
 import { normalizeWorldInfoActivationBatch } from './tauritavern/agent/world-info-activation.js';
+import { createPerformanceTrace } from './tauri/perf/performance-trace.js';
 
 export const world_info_insertion_strategy = {
     evenly: 0,
@@ -4747,7 +4748,10 @@ async function getPersonaLore() {
     return entries;
 }
 
-export async function getSortedEntries() {
+export async function getSortedEntries(perfTrace = null) {
+    const ownsPerfTrace = perfTrace === null;
+    perfTrace ??= createPerformanceTrace('tt:world-info', { source: 'getSortedEntries' });
+    let succeeded = false;
     try {
         const worldsToPrefetch = new Set();
         for (const worldName of selected_world_info || []) {
@@ -4769,60 +4773,68 @@ export async function getSortedEntries() {
             worldsToPrefetch.add(personaWorld);
         }
 
-        await prefetchWorldInfos(worldsToPrefetch);
+        await perfTrace.measureAsync('entries-prefetch', () => prefetchWorldInfos(worldsToPrefetch));
 
         const [
             globalLore,
             characterLore,
             chatLore,
             personaLore,
-        ] = await Promise.all([
+        ] = await perfTrace.measureAsync('entries-collect', () => Promise.all([
             getGlobalLore(),
             getCharacterLore(),
             getChatLore(),
             getPersonaLore(),
-        ]);
+        ]));
 
-        await eventSource.emit(event_types.WORLDINFO_ENTRIES_LOADED, { globalLore, characterLore, chatLore, personaLore });
+        await perfTrace.measureAsync('entries-loaded-event', () => eventSource.emit(event_types.WORLDINFO_ENTRIES_LOADED, { globalLore, characterLore, chatLore, personaLore }));
 
-        let entries;
+        let entries = perfTrace.measure('entries-sort', () => {
+            let sorted;
+            switch (Number(world_info_character_strategy)) {
+                case world_info_insertion_strategy.evenly:
+                    sorted = [...globalLore, ...characterLore].sort(sortFn);
+                    break;
+                case world_info_insertion_strategy.character_first:
+                    sorted = [...characterLore.sort(sortFn), ...globalLore.sort(sortFn)];
+                    break;
+                case world_info_insertion_strategy.global_first:
+                    sorted = [...globalLore.sort(sortFn), ...characterLore.sort(sortFn)];
+                    break;
+                default:
+                    console.error('[WI] Unknown WI insertion strategy:', world_info_character_strategy, 'defaulting to evenly');
+                    sorted = [...globalLore, ...characterLore].sort(sortFn);
+                    break;
+            }
 
-        switch (Number(world_info_character_strategy)) {
-            case world_info_insertion_strategy.evenly:
-                entries = [...globalLore, ...characterLore].sort(sortFn);
-                break;
-            case world_info_insertion_strategy.character_first:
-                entries = [...characterLore.sort(sortFn), ...globalLore.sort(sortFn)];
-                break;
-            case world_info_insertion_strategy.global_first:
-                entries = [...globalLore.sort(sortFn), ...characterLore.sort(sortFn)];
-                break;
-            default:
-                console.error('[WI] Unknown WI insertion strategy:', world_info_character_strategy, 'defaulting to evenly');
-                entries = [...globalLore, ...characterLore].sort(sortFn);
-                break;
-        }
-
-        // Chat lore always goes first, then persona lore, then the rest
-        entries = [...chatLore.sort(sortFn), ...personaLore.sort(sortFn), ...entries];
+            // Chat lore always goes first, then persona lore, then the rest
+            return [...chatLore.sort(sortFn), ...personaLore.sort(sortFn), ...sorted];
+        });
 
         // Calculate hash and parse decorators. Split maps to preserve old hashes.
-        entries = entries.map((entry) => {
+        entries = perfTrace.measure('entries-prepare', () => entries.map((entry) => {
             const [decorators, content] = parseDecorators(entry.content || '');
             return { ...entry, decorators, content };
         }).map((entry) => {
             const hash = getStringHash(JSON.stringify(entry));
             return { ...entry, hash };
-        });
+        }));
 
         console.debug(`[WI] Found ${entries.length} world lore entries. Sorted by strategy`, Object.entries(world_info_insertion_strategy).find((x) => x[1] === world_info_character_strategy));
 
         // Need to deep clone the entries to avoid modifying the cached data
-        return structuredClone(entries);
+        const clonedEntries = perfTrace.measure('entries-final-clone', () => structuredClone(entries));
+        succeeded = true;
+        return clonedEntries;
     }
     catch (e) {
         console.error(e);
         return [];
+    }
+    finally {
+        if (ownsPerfTrace) {
+            perfTrace.finish({ success: succeeded });
+        }
     }
 }
 
@@ -4892,6 +4904,36 @@ function parseDecorators(content) {
  */
 //MARK: checkWorldInfo
 export async function checkWorldInfo(chat, maxContext, isDryRun, globalScanData = defaultGlobalScanData) {
+    const perfTrace = createPerformanceTrace('tt:world-info', {
+        chatMessages: chat.length,
+        trigger: globalScanData.trigger,
+        dryRun: Boolean(isDryRun),
+    });
+
+    try {
+        const result = await checkWorldInfoInternal(chat, maxContext, isDryRun, globalScanData, perfTrace);
+        perfTrace.finish({
+            success: true,
+            activatedEntries: getCollectionSizeForPerf(result.allActivatedEntries),
+        });
+        return result;
+    } catch (error) {
+        perfTrace.finish({ success: false });
+        throw error;
+    }
+}
+
+function getCollectionSizeForPerf(value) {
+    if (value instanceof Map || value instanceof Set) {
+        return value.size;
+    }
+    if (Array.isArray(value)) {
+        return value.length;
+    }
+    return 0;
+}
+
+async function checkWorldInfoInternal(chat, maxContext, isDryRun, globalScanData, perfTrace) {
     const context = getContext();
     const buffer = new WorldInfoBuffer(chat, globalScanData);
 
@@ -4901,14 +4943,16 @@ export async function checkWorldInfo(chat, maxContext, isDryRun, globalScanData 
 
     // Add the depth or AN if enabled
     // Put this code here since otherwise, the chat reference is modified
-    for (const key of Object.keys(context.extensionPrompts)) {
-        if (context.extensionPrompts[key]?.scan) {
-            const prompt = await getExtensionPromptByName(key);
-            if (prompt) {
-                buffer.addInject(prompt);
+    await perfTrace.measureAsync('prepare-injections', async () => {
+        for (const key of Object.keys(context.extensionPrompts)) {
+            if (context.extensionPrompts[key]?.scan) {
+                const prompt = await getExtensionPromptByName(key);
+                if (prompt) {
+                    buffer.addInject(prompt);
+                }
             }
         }
-    }
+    });
 
     /** @type {scan_state} */
     let scanState = scan_state.INITIAL;
@@ -4926,10 +4970,10 @@ export async function checkWorldInfo(chat, maxContext, isDryRun, globalScanData 
     }
 
     console.debug(`[WI] Context size: ${maxContext}; WI budget: ${budget} (max% = ${world_info_budget}%, cap = ${world_info_budget_cap})`);
-    const sortedEntries = await getSortedEntries();
+    const sortedEntries = await perfTrace.measureAsync('entries-total', () => getSortedEntries(perfTrace));
     const timedEffects = new WorldInfoTimedEffects(chat, sortedEntries, isDryRun);
 
-    timedEffects.checkTimedEffects();
+    perfTrace.measure('timed-effects-check', () => timedEffects.checkTimedEffects());
 
     if (sortedEntries.length === 0) {
         return { worldInfoBefore: '', worldInfoAfter: '', WIDepthEntries: [], EMEntries: [], ANBeforeEntries: [], ANAfterEntries: [], outletEntries: {}, allActivatedEntries: new Set() };
@@ -4966,6 +5010,7 @@ export async function checkWorldInfo(chat, maxContext, isDryRun, globalScanData 
 
         // Loop and find all entries that can activate here
         let activatedNow = new Set();
+        const entryScanStartedAt = perfTrace.start();
 
         for (const entry of sortedEntries) {
             // Logging preparation
@@ -5172,6 +5217,7 @@ export async function checkWorldInfo(chat, maxContext, isDryRun, globalScanData 
             activatedNow.add(entry);
             continue;
         }
+        perfTrace.end('entry-scan', entryScanStartedAt);
 
         console.debug(`[WI] Search done. Found ${activatedNow.size} possible entries.`);
 
@@ -5188,9 +5234,9 @@ export async function checkWorldInfo(chat, maxContext, isDryRun, globalScanData 
 
 
         let newContent = '';
-        const textToScanTokens = await getTokenCountAsync(allActivatedText);
+        const textToScanTokens = await perfTrace.measureAsync('token-count', () => getTokenCountAsync(allActivatedText));
 
-        filterByInclusionGroups(newEntries, allActivatedEntries, buffer, scanState, timedEffects);
+        perfTrace.measure('inclusion-groups', () => filterByInclusionGroups(newEntries, allActivatedEntries, buffer, scanState, timedEffects));
 
         console.debug('[WI] --- PROBABILITY CHECKS ---');
         !newEntries.length && console.debug('[WI] No probability checks to do');
@@ -5239,7 +5285,10 @@ export async function checkWorldInfo(chat, maxContext, isDryRun, globalScanData 
             entry.content = substituteParams(entry.content);
             newContent += `${entry.content}\n`;
 
-            if (!entry.ignoreBudget && (textToScanTokens + (await getTokenCountAsync(newContent))) >= budget) {
+            const newContentTokens = entry.ignoreBudget
+                ? 0
+                : await perfTrace.measureAsync('token-count', () => getTokenCountAsync(newContent));
+            if (!entry.ignoreBudget && (textToScanTokens + newContentTokens) >= budget) {
                 if (!token_budget_overflowed) {
                     console.debug('[WI] --- BUDGET OVERFLOW CHECK ---');
                     if (world_info_overflow_alert) {
@@ -5356,7 +5405,7 @@ export async function checkWorldInfo(chat, maxContext, isDryRun, globalScanData 
             },
             timedEffects,
         };
-        await eventSource.emit(event_types.WORLDINFO_SCAN_DONE, args);
+        await perfTrace.measureAsync('scan-event-listeners', () => eventSource.emit(event_types.WORLDINFO_SCAN_DONE, args));
 
         // Some fields are allowed to be changed by listeners, those will be handled here manually. They can be updated via changed the args from the listeners.
         // Any array provided directly can be modified by updating it's elements, adding or removing elements. This has to be done consistently.
@@ -5371,6 +5420,7 @@ export async function checkWorldInfo(chat, maxContext, isDryRun, globalScanData 
     }
 
     console.debug('[WI] --- BUILDING PROMPT ---');
+    const promptBuildStartedAt = perfTrace.start();
 
     // Forward-sorted list of entries for joining
     const WIBeforeEntries = [];
@@ -5461,6 +5511,7 @@ export async function checkWorldInfo(chat, maxContext, isDryRun, globalScanData 
 
     console.log(`[WI] ${isDryRun ? 'Hypothetically adding' : 'Adding'} ${allActivatedEntries.size} entries to prompt`, Array.from(allActivatedEntries.values()));
     console.debug(`[WI] --- DONE${isDryRun ? ' (DRY RUN)' : ''} ---`);
+    perfTrace.end('prompt-build', promptBuildStartedAt);
 
     return { worldInfoBefore, worldInfoAfter, EMEntries, WIDepthEntries, ANBeforeEntries: ANTopEntries, ANAfterEntries: ANBottomEntries, outletEntries: WIOutletEntries, allActivatedEntries: new Set(allActivatedEntries.values()) };
 }

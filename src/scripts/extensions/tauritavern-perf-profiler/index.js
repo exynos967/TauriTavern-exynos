@@ -1,0 +1,444 @@
+import { eventSource, event_types } from '../../../script.js';
+
+const GLOBAL_KEY = '__TAURITAVERN_PERF_PROFILER__';
+const MAX_RECORDS = 20;
+const MAX_FRAME_SAMPLES = 600;
+
+const state = {
+    capturing: false,
+    current: null,
+    records: [],
+    nextId: 1,
+    observer: null,
+    measureObserver: null,
+    rafId: null,
+    lastFrameAt: null,
+    panel: null,
+    status: null,
+    toggleButton: null,
+};
+
+function now() {
+    return globalThis.performance?.now?.() ?? Date.now();
+}
+
+function finiteRound(value, digits = 1) {
+    const number = Number(value);
+    if (!Number.isFinite(number)) {
+        return null;
+    }
+
+    const factor = 10 ** digits;
+    return Math.round(number * factor) / factor;
+}
+
+function getCollectionSize(value) {
+    if (value instanceof Map || value instanceof Set) {
+        return value.size;
+    }
+    if (Array.isArray(value)) {
+        return value.length;
+    }
+    return 0;
+}
+
+function createRecord(type, dryRun) {
+    const startedAt = now();
+    return {
+        id: state.nextId++,
+        type: String(type ?? 'unknown'),
+        dryRun: Boolean(dryRun),
+        startedAt,
+        startedAtIso: new Date().toISOString(),
+        endedAt: null,
+        durationMs: null,
+        finishReason: null,
+        worldInfo: {
+            entriesLoadedAtMs: null,
+            globalEntries: 0,
+            characterEntries: 0,
+            chatEntries: 0,
+            personaEntries: 0,
+            scanLoops: 0,
+            sortedEntries: 0,
+            activatedEntries: 0,
+            successfulEntries: 0,
+            budgetOverflowed: false,
+            finalScanAtMs: null,
+            trace: null,
+        },
+        stream: {
+            chunks: 0,
+            chars: 0,
+            firstChunkAtMs: null,
+            lastChunkAtMs: null,
+            renderedAtMs: null,
+            trace: null,
+        },
+        responsiveness: {
+            frames: 0,
+            averageFrameMs: null,
+            maxFrameMs: 0,
+            longFrames: 0,
+            longTasks: 0,
+            longTaskTotalMs: 0,
+            maxLongTaskMs: 0,
+        },
+        memory: readHeapSample(),
+        _frameSamples: [],
+    };
+}
+
+function readHeapSample() {
+    const memory = globalThis.performance?.memory;
+    if (!memory) {
+        return null;
+    }
+
+    return {
+        usedHeapBytes: Number(memory.usedJSHeapSize) || null,
+        totalHeapBytes: Number(memory.totalJSHeapSize) || null,
+        heapLimitBytes: Number(memory.jsHeapSizeLimit) || null,
+    };
+}
+
+function finalizeRecord(reason) {
+    const record = state.current;
+    if (!record) {
+        return;
+    }
+
+    const endedAt = now();
+    record.endedAt = endedAt;
+    record.durationMs = finiteRound(endedAt - record.startedAt);
+    record.finishReason = reason;
+    record.memory = readHeapSample() ?? record.memory;
+
+    const samples = record._frameSamples;
+    if (samples.length > 0) {
+        const total = samples.reduce((sum, value) => sum + value, 0);
+        record.responsiveness.frames = samples.length;
+        record.responsiveness.averageFrameMs = finiteRound(total / samples.length);
+        record.responsiveness.maxFrameMs = finiteRound(Math.max(...samples));
+        record.responsiveness.longFrames = samples.filter(value => value >= 50).length;
+    }
+    delete record._frameSamples;
+
+    state.records.push(record);
+    if (state.records.length > MAX_RECORDS) {
+        state.records.splice(0, state.records.length - MAX_RECORDS);
+    }
+
+    state.current = null;
+    renderStatus();
+}
+
+function onGenerationStarted(type, _options, dryRun) {
+    if (!state.capturing) {
+        return;
+    }
+
+    finalizeRecord('superseded');
+    state.current = createRecord(type, dryRun);
+    renderStatus();
+}
+
+function onWorldInfoEntriesLoaded({ globalLore, characterLore, chatLore, personaLore } = {}) {
+    const record = state.current;
+    if (!record) {
+        return;
+    }
+
+    record.worldInfo.entriesLoadedAtMs = finiteRound(now() - record.startedAt);
+    record.worldInfo.globalEntries = getCollectionSize(globalLore);
+    record.worldInfo.characterEntries = getCollectionSize(characterLore);
+    record.worldInfo.chatEntries = getCollectionSize(chatLore);
+    record.worldInfo.personaEntries = getCollectionSize(personaLore);
+}
+
+function onWorldInfoScanDone(args = {}) {
+    const record = state.current;
+    if (!record) {
+        return;
+    }
+
+    record.worldInfo.scanLoops = Math.max(record.worldInfo.scanLoops, Number(args.state?.loopCount) || 0);
+    record.worldInfo.sortedEntries = getCollectionSize(args.sortedEntries);
+    record.worldInfo.activatedEntries = getCollectionSize(args.activated?.entries);
+    record.worldInfo.successfulEntries = getCollectionSize(args.new?.successful);
+    record.worldInfo.budgetOverflowed ||= Boolean(args.budget?.overflowed);
+
+    if (args.isFinal) {
+        record.worldInfo.finalScanAtMs = finiteRound(now() - record.startedAt);
+    }
+}
+
+function onStreamTokenReceived(text) {
+    const record = state.current;
+    if (!record) {
+        return;
+    }
+
+    const elapsed = now() - record.startedAt;
+    record.stream.chunks += 1;
+    record.stream.chars = typeof text === 'string' ? text.length : record.stream.chars;
+    record.stream.firstChunkAtMs ??= finiteRound(elapsed);
+    record.stream.lastChunkAtMs = finiteRound(elapsed);
+}
+
+function onMessageRendered() {
+    const record = state.current;
+    if (record) {
+        record.stream.renderedAtMs = finiteRound(now() - record.startedAt);
+    }
+}
+
+function startFrameSampler() {
+    if (state.rafId !== null) {
+        return;
+    }
+
+    const step = timestamp => {
+        if (state.capturing) {
+            if (state.current && state.lastFrameAt !== null) {
+                const delta = timestamp - state.lastFrameAt;
+                const samples = state.current._frameSamples;
+                if (samples.length < MAX_FRAME_SAMPLES) {
+                    samples.push(delta);
+                }
+            }
+            state.lastFrameAt = timestamp;
+            state.rafId = requestAnimationFrame(step);
+        } else {
+            state.lastFrameAt = null;
+            state.rafId = null;
+        }
+    };
+
+    state.rafId = requestAnimationFrame(step);
+}
+
+function installLongTaskObserver() {
+    if (state.observer || typeof PerformanceObserver !== 'function') {
+        return;
+    }
+
+    try {
+        state.observer = new PerformanceObserver(list => {
+            for (const entry of list.getEntries()) {
+                const record = state.current;
+                if (!record || entry.startTime < record.startedAt) {
+                    continue;
+                }
+
+                const duration = Number(entry.duration) || 0;
+                record.responsiveness.longTasks += 1;
+                record.responsiveness.longTaskTotalMs = finiteRound(record.responsiveness.longTaskTotalMs + duration);
+                record.responsiveness.maxLongTaskMs = finiteRound(Math.max(record.responsiveness.maxLongTaskMs, duration));
+            }
+        });
+        state.observer.observe({ type: 'longtask', buffered: false });
+    } catch {
+        state.observer = null;
+    }
+}
+
+function installMeasureObserver() {
+    if (state.measureObserver || typeof PerformanceObserver !== 'function') {
+        return;
+    }
+
+    try {
+        state.measureObserver = new PerformanceObserver(list => {
+            for (const entry of list.getEntries()) {
+                if (!['tt:world-info:total', 'tt:stream:total'].includes(entry.name)) {
+                    continue;
+                }
+
+                const record = [state.current, ...state.records.slice().reverse()]
+                    .find(candidate => candidate
+                        && candidate.startedAt <= entry.startTime
+                        && (candidate.endedAt === null || candidate.endedAt >= entry.startTime));
+                if (!record) {
+                    continue;
+                }
+
+                const trace = {
+                    durationMs: finiteRound(entry.duration),
+                    ...(entry.detail && typeof entry.detail === 'object' ? structuredClone(entry.detail) : {}),
+                };
+                if (entry.name === 'tt:world-info:total') {
+                    record.worldInfo.trace = trace;
+                } else {
+                    record.stream.trace = trace;
+                }
+                renderStatus();
+            }
+        });
+        state.measureObserver.observe({ type: 'measure', buffered: false });
+    } catch {
+        state.measureObserver = null;
+    }
+}
+
+function startCapture() {
+    if (state.capturing) {
+        return;
+    }
+
+    state.capturing = true;
+    state.lastFrameAt = null;
+    installLongTaskObserver();
+    installMeasureObserver();
+    startFrameSampler();
+    renderStatus();
+}
+
+function stopCapture() {
+    if (!state.capturing) {
+        return;
+    }
+
+    finalizeRecord('capture-stopped');
+    state.capturing = false;
+    renderStatus();
+}
+
+function snapshot() {
+    return {
+        schemaVersion: 1,
+        exportedAt: new Date().toISOString(),
+        userAgent: navigator.userAgent,
+        viewport: {
+            width: globalThis.innerWidth,
+            height: globalThis.innerHeight,
+            devicePixelRatio: globalThis.devicePixelRatio,
+        },
+        current: state.current ? structuredClone(state.current) : null,
+        records: structuredClone(state.records),
+    };
+}
+
+function downloadReport() {
+    const blob = new Blob([JSON.stringify(snapshot(), null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement('a');
+    anchor.href = url;
+    anchor.download = `tauritavern-perf-${new Date().toISOString().replaceAll(':', '-')}.json`;
+    anchor.click();
+    URL.revokeObjectURL(url);
+}
+
+function formatMs(value) {
+    return Number.isFinite(value) ? `${Math.round(value)} ms` : '-';
+}
+
+function renderStatus() {
+    if (!state.status || !state.toggleButton) {
+        return;
+    }
+
+    state.toggleButton.classList.toggle('is-capturing', state.capturing);
+    const record = state.current ?? state.records.at(-1);
+    if (!record) {
+        state.status.textContent = state.capturing ? '等待下一次生成…' : '采集已停止';
+        return;
+    }
+
+    const duration = state.current ? now() - record.startedAt : record.durationMs;
+    const worldInfoPhases = record.worldInfo.trace?.phases ?? {};
+    const streamPhases = record.stream.trace?.phases ?? {};
+    state.status.innerHTML = `
+        <div><b>${state.current ? '正在生成' : '最近一次'}</b> #${record.id} · ${record.type}</div>
+        <div>总耗时：${formatMs(duration)}</div>
+        <div>世界书：${record.worldInfo.sortedEntries} 条 / ${record.worldInfo.scanLoops} 轮 / ${record.worldInfo.activatedEntries} 激活</div>
+        <div>载入：${formatMs(worldInfoPhases['entries-total']?.durationMs)} · 匹配：${formatMs(worldInfoPhases['entry-scan']?.durationMs)} · Token：${formatMs(worldInfoPhases['token-count']?.durationMs)}</div>
+        <div>格式化：${formatMs(streamPhases['format-total']?.durationMs)} · DOM：${formatMs(streamPhases['dom-commit']?.durationMs)}</div>
+        <div>首块：${formatMs(record.stream.firstChunkAtMs)} · 流块：${record.stream.chunks}</div>
+        <div>长任务：${record.responsiveness.longTasks} 次 / ${formatMs(record.responsiveness.maxLongTaskMs)}</div>
+    `;
+}
+
+function createUi() {
+    const toggleButton = document.createElement('button');
+    toggleButton.id = 'tt-perf-profiler-toggle';
+    toggleButton.type = 'button';
+    toggleButton.textContent = 'Perf';
+    toggleButton.title = '打开性能分析器';
+
+    const panel = document.createElement('section');
+    panel.id = 'tt-perf-profiler-panel';
+    panel.hidden = true;
+    panel.innerHTML = `
+        <header>
+            <strong>性能分析器</strong>
+            <button type="button" data-action="close" aria-label="关闭">×</button>
+        </header>
+        <div class="tt-perf-profiler-status"></div>
+        <footer>
+            <button type="button" data-action="capture">开始采集</button>
+            <button type="button" data-action="export">导出 JSON</button>
+            <button type="button" data-action="clear">清空</button>
+        </footer>
+    `;
+
+    document.body.append(toggleButton, panel);
+    state.panel = panel;
+    state.status = panel.querySelector('.tt-perf-profiler-status');
+    state.toggleButton = toggleButton;
+
+    const captureButton = panel.querySelector('[data-action="capture"]');
+    toggleButton.addEventListener('click', () => {
+        panel.hidden = !panel.hidden;
+        renderStatus();
+    });
+    panel.querySelector('[data-action="close"]').addEventListener('click', () => {
+        panel.hidden = true;
+    });
+    captureButton.addEventListener('click', () => {
+        state.capturing ? stopCapture() : startCapture();
+        captureButton.textContent = state.capturing ? '停止采集' : '开始采集';
+    });
+    panel.querySelector('[data-action="export"]').addEventListener('click', downloadReport);
+    panel.querySelector('[data-action="clear"]').addEventListener('click', () => {
+        state.records = [];
+        renderStatus();
+    });
+
+    renderStatus();
+}
+
+function subscribeEvents() {
+    eventSource.on(event_types.GENERATION_STARTED, onGenerationStarted);
+    eventSource.on(event_types.WORLDINFO_ENTRIES_LOADED, onWorldInfoEntriesLoaded);
+    eventSource.on(event_types.WORLDINFO_SCAN_DONE, onWorldInfoScanDone);
+    eventSource.on(event_types.STREAM_TOKEN_RECEIVED, onStreamTokenReceived);
+    eventSource.on(event_types.CHARACTER_MESSAGE_RENDERED, onMessageRendered);
+    eventSource.on(event_types.GENERATION_ENDED, () => finalizeRecord('generation-ended'));
+    eventSource.on(event_types.GENERATION_STOPPED, () => finalizeRecord('generation-stopped'));
+}
+
+export function init() {
+    if (globalThis[GLOBAL_KEY]) {
+        return;
+    }
+
+    createUi();
+    subscribeEvents();
+
+    const api = Object.freeze({
+        start: startCapture,
+        stop: stopCapture,
+        snapshot,
+        downloadReport,
+        get capturing() {
+            return state.capturing;
+        },
+    });
+
+    Object.defineProperty(globalThis, GLOBAL_KEY, {
+        value: api,
+        configurable: true,
+        enumerable: false,
+    });
+}
