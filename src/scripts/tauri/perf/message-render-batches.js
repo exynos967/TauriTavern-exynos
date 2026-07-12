@@ -11,11 +11,3 @@ export function getMessageRenderBatches(messageCount, batchSize = DEFAULT_PREPEN
 
     return batches;
 }
-
-export function shouldFollowStreamingOutput(scrollLocked) {
-    return scrollLocked !== true;
-}
-
-export function isChatViewportAtBottom({ scrollHeight, clientHeight, scrollTop }, threshold = 5) {
-    return Math.abs(Number(scrollHeight) - Number(clientHeight) - Number(scrollTop)) < threshold;
-}

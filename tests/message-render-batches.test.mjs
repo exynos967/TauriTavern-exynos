@@ -6,7 +6,6 @@ import { fileURLToPath } from 'node:url';
 
 import {
     getMessageRenderBatches,
-    isChatViewportAtBottom,
 } from '../src/scripts/tauri/perf/message-render-batches.js';
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -20,20 +19,16 @@ test('message prepend rendering is split into stable contiguous batches', () => 
     assert.deepEqual(getMessageRenderBatches(0), []);
 });
 
-test('chat viewport bottom detection tolerates only a small rounding gap', () => {
-    assert.equal(isChatViewportAtBottom({ scrollHeight: 1000, clientHeight: 400, scrollTop: 598 }), true);
-    assert.equal(isChatViewportAtBottom({ scrollHeight: 1000, clientHeight: 400, scrollTop: 590 }), false);
-});
-
-test('message insertion and generation preserve the send-time viewport intent', async () => {
+test('message insertion and generation delegate scrolling to one controller', async () => {
     const source = await readFile(path.join(REPO_ROOT, 'src/script.js'), 'utf8');
 
-    assert.match(source, /const followStreamingOutput = isChatViewportAtBottom\(chatElement\[0\]\)/);
-    assert.match(source, /Generate\(generateType, \{ \.\.\.agentOptions, followStreamingOutput \}\)/);
-    assert.match(source, /if \(!followStreamingOutput\) \{\s*cancelPendingChatScroll\(\)/);
-    assert.match(source, /new StreamingProcessor\([^;]+followStreamingOutput\)/);
-    assert.match(source, /saveReply\(\{[^}]+scroll: followStreamingOutput/s);
-    assert.match(source, /addOneMessage\(message, \{ scroll \}\)/);
-    assert.doesNotMatch(source, /shouldFollowStreamingOutput/);
-    assert.match(source, /scrollLock = true;\s*cancelPendingChatScroll\(\)/);
+    assert.match(source, /const chatScrollController = createChatScrollController\(/);
+    assert.match(source, /async function GenerateInternal\([^]*chatScrollController\.beginGeneration\(\)/);
+    assert.match(source, /finally \{\s*chatScrollController\.endGeneration\(\)/);
+    assert.match(source, /chatScrollController\.onViewportChanged\(\)/);
+    assert.match(source, /chatScrollController\.requestScroll\(\{ waitForFrame, force \}\)/);
+    assert.match(source, /const shouldScroll = scroll && chatScrollController\.shouldFollowOutput\(\)/);
+    assert.match(source, /mediaScrollBehavior = chatScrollController\.shouldFollowOutput\(\)/);
+    assert.match(source, /if \(!chatScrollController\.shouldFollowOutput\(\)\) \{\s*return;/);
+    assert.doesNotMatch(source, /followStreamingOutput/);
 });
