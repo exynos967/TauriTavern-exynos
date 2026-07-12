@@ -15,6 +15,7 @@ import { replaceMesTextHtmlWithRuntimePolicy } from './scripts/tauri/message/mes
 import { getCodeHighlightCoordinator } from './scripts/tauri/perf/code-highlight-coordinator.js';
 import { isInlineDrawerContentOpen, setInlineDrawerContentOpen } from './scripts/tauri/perf/inline-drawer-motion.js';
 import { createPerformanceTrace } from './scripts/tauri/perf/performance-trace.js';
+import { getStreamingRenderInterval } from './scripts/tauri/perf/streaming-render-policy.js';
 import {
     isTauriChatPayloadTransportEnabled,
     loadCharacterChatPayload,
@@ -4599,7 +4600,11 @@ class StreamingProcessor {
         this.stoppingStrings = getStoppingStrings(isImpersonate, isContinue, main_api);
 
         try {
-            const sw = new Stopwatch(1000 / power_user.streaming_fps);
+            const sw = new Stopwatch(getStreamingRenderInterval({
+                configuredFps: power_user.streaming_fps,
+                mobile: isMobile(),
+                hidden: document.hidden,
+            }));
             const timestamps = [];
             for await (const { text, swipes, logprobs, toolCalls, state } of this.generator()) {
                 const now = Date.now();
