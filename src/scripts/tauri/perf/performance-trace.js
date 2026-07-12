@@ -15,6 +15,17 @@ function createDisabledTrace() {
     };
 }
 
+function readRuntimeSnapshot() {
+    const memory = globalThis.performance?.memory;
+    const document = globalThis.document;
+    return {
+        domNodes: document?.getElementsByTagName?.('*')?.length ?? null,
+        messageNodes: document?.querySelectorAll?.('#chat .mes')?.length ?? null,
+        usedHeapBytes: Number(memory?.usedJSHeapSize) || null,
+        totalHeapBytes: Number(memory?.totalJSHeapSize) || null,
+    };
+}
+
 /**
  * Creates an opt-in performance trace that publishes phase and total measures.
  * @param {string} prefix Performance entry prefix, for example `tt:world-info`
@@ -28,7 +39,9 @@ export function createPerformanceTrace(prefix, detail = {}) {
 
     const runId = globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random()}`;
     const startedAt = perf.now();
+    const startedSnapshot = readRuntimeSnapshot();
     const phases = {};
+    let finished = false;
 
     const record = (name, phaseStartedAt) => {
         const durationMs = perf.now() - phaseStartedAt;
@@ -72,6 +85,10 @@ export function createPerformanceTrace(prefix, detail = {}) {
             }
         },
         finish(result = {}) {
+            if (finished) {
+                return;
+            }
+            finished = true;
             const durationMs = perf.now() - startedAt;
             const normalizedPhases = Object.fromEntries(Object.entries(phases).map(([name, phase]) => [name, {
                 count: phase.count,
@@ -87,6 +104,10 @@ export function createPerformanceTrace(prefix, detail = {}) {
                         ...detail,
                         ...result,
                         phases: normalizedPhases,
+                        runtime: {
+                            started: startedSnapshot,
+                            finished: readRuntimeSnapshot(),
+                        },
                     },
                 });
             } catch {

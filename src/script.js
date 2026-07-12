@@ -1856,23 +1856,28 @@ export async function showMoreMessages(messagesToLoad = null) {
         const prevHeight = chatElement.prop('scrollHeight');
         const showMoreButton = $('#show_more_messages');
         const isButtonInView = showMoreButton[0] && isElementInViewport(showMoreButton[0]);
+        const perfTrace = createPerformanceTrace('tt:history-prepend', {
+            transport: 'tauri',
+            requestedMessages: count,
+        });
 
         const run = (async () => {
-            const result = windowState.kind === 'group'
-                ? await loadGroupChatPayloadBefore({
+            const result = await perfTrace.measureAsync('payload-read', () => windowState.kind === 'group'
+                ? loadGroupChatPayloadBefore({
                     id: windowState.id,
                     cursor: windowState.cursor,
                     maxLines: count,
                 })
-                : await loadCharacterChatPayloadBefore({
+                : loadCharacterChatPayloadBefore({
                     characterName: windowState.characterName,
                     avatarUrl: windowState.avatarUrl,
                     fileName: windowState.fileName,
                     cursor: windowState.cursor,
                     maxLines: count,
-                });
+                }));
 
             if (getWindowedChatState() !== windowState) {
+                perfTrace.finish({ success: false, reason: 'stale' });
                 return;
             }
 
@@ -1885,26 +1890,34 @@ export async function showMoreMessages(messagesToLoad = null) {
                     hasMoreBefore: false,
                 });
                 await eventSource.emit(event_types.MORE_MESSAGES_LOADED);
+                perfTrace.finish({ success: true, messages: 0 });
                 return;
             }
 
-            messages.forEach(ensureMessageMediaIsArray);
-            chat.splice(0, 0, ...messages);
+            perfTrace.measure('payload-apply', () => {
+                messages.forEach(ensureMessageMediaIsArray);
+                chat.splice(0, 0, ...messages);
+            });
             if (this_edit_mes_id >= 0) {
                 this_edit_mes_id = Number(this_edit_mes_id) + messages.length;
             }
 
-            const fragment = document.createDocumentFragment();
-            for (let id = 0; id < messages.length; id += 1) {
-                const messageElement = updateMessageElement(chat[id], { messageId: id });
-                fragment.appendChild(messageElement[0]);
-            }
+            const fragment = perfTrace.measure('messages-render', () => {
+                const rendered = document.createDocumentFragment();
+                for (let id = 0; id < messages.length; id += 1) {
+                    const messageElement = updateMessageElement(chat[id], { messageId: id });
+                    rendered.appendChild(messageElement[0]);
+                }
+                return rendered;
+            });
 
-            if (showMoreButton[0]) {
-                showMoreButton[0].after(fragment);
-            } else {
-                chatElement[0].prepend(fragment);
-            }
+            perfTrace.measure('dom-commit', () => {
+                if (showMoreButton[0]) {
+                    showMoreButton[0].after(fragment);
+                } else {
+                    chatElement[0].prepend(fragment);
+                }
+            });
 
             updateViewMessageIds(0);
             refreshSwipeButtons();
@@ -1928,8 +1941,12 @@ export async function showMoreMessages(messagesToLoad = null) {
 
             applyStylePins();
             applyCharacterTagsToMessageDivs();
-            await eventSource.emit(event_types.MORE_MESSAGES_LOADED);
-        })();
+            await perfTrace.measureAsync('loaded-listeners', () => eventSource.emit(event_types.MORE_MESSAGES_LOADED));
+            perfTrace.finish({ success: true, messages: messages.length });
+        })().catch(error => {
+            perfTrace.finish({ success: false, error: String(error?.message ?? error) });
+            throw error;
+        });
 
         windowedShowMoreMessagesPending = { state: windowState, promise: run };
 
@@ -2021,6 +2038,10 @@ export async function printMessages() {
  * @param {Boolean} [options.fade=true] When false, the swipe chevrons will not fade in.
  */
 export async function redisplayChat({ targetChat = chat, startIndex = 0, fade = true } = {}) {
+    const perfTrace = createPerformanceTrace('tt:messages-redisplay', {
+        messages: Math.max(0, targetChat.length - startIndex),
+        startIndex,
+    });
     const messageElements = chatElement.find('.mes');
     messageElements.removeClass('last_mes');
 
@@ -2038,14 +2059,16 @@ export async function redisplayChat({ targetChat = chat, startIndex = 0, fade = 
             const batchEnd = Math.min(batchStart + batchSize, targetChat.length);
             const fragment = document.createDocumentFragment();
 
-            for (let id = batchStart; id < batchEnd; id += 1) {
-                const messageElement = updateMessageElement(targetChat[id], { messageId: id });
-                const element = messageElement[0];
-                fragment.appendChild(element);
-                lastMessageElement = element;
-            }
+            perfTrace.measure('messages-render', () => {
+                for (let id = batchStart; id < batchEnd; id += 1) {
+                    const messageElement = updateMessageElement(targetChat[id], { messageId: id });
+                    const element = messageElement[0];
+                    fragment.appendChild(element);
+                    lastMessageElement = element;
+                }
+            });
 
-            appendTarget.appendChild(fragment);
+            perfTrace.measure('dom-commit', () => appendTarget.appendChild(fragment));
 
             if (batchEnd < targetChat.length) {
                 await new Promise((resolve) => requestAnimationFrame(resolve));
@@ -2059,6 +2082,7 @@ export async function redisplayChat({ targetChat = chat, startIndex = 0, fade = 
     refreshSwipeButtons(false, fade);
     applyStylePins();
     updateEditArrowClasses();
+    perfTrace.finish({ success: true });
 
     console.info(`Rendered ${targetChat.length - startIndex} messages in ${((performance.now() - t1) / 1000).toFixed(3)} seconds.`);
 }
@@ -5184,6 +5208,7 @@ async function GenerateInternalCore(type, { automatic_trigger, force_name2, quie
     }
 
     const promptAssemblyStartedAt = perfTrace.start();
+    let promptSubphaseStartedAt = perfTrace.start();
 
     //#########QUIET PROMPT STUFF##############
     //this function just gives special care to novel quiet instruction prompts
@@ -5360,6 +5385,8 @@ async function GenerateInternalCore(type, { automatic_trigger, force_name2, quie
         coreChat.pop();
     }
 
+    perfTrace.end('context-preparation', promptSubphaseStartedAt);
+    promptSubphaseStartedAt = perfTrace.start();
     const coreChatRegexedMessages = await perfTrace.measureAsync('history-regex', () => getRegexedStringBatchAsync(coreChat.map((/** @type {ChatMessage} */ chatItem, index) => ({
         rawString: chatItem.mes,
         placement: chatItem.is_user ? regex_placement.USER_INPUT : regex_placement.AI_OUTPUT,
@@ -5420,6 +5447,9 @@ async function GenerateInternalCore(type, { automatic_trigger, force_name2, quie
             break;
         }
     }
+
+    perfTrace.end('history-preparation', promptSubphaseStartedAt);
+    promptSubphaseStartedAt = perfTrace.start();
 
     if (!dryRun) {
         console.debug('Running extension interceptors');
@@ -5496,7 +5526,9 @@ async function GenerateInternalCore(type, { automatic_trigger, force_name2, quie
         creatorNotes: creatorNotes,
         trigger: GENERATION_TYPE_TRIGGERS.includes(type) ? type : 'normal',
     };
+    perfTrace.end('pre-world-preparation', promptSubphaseStartedAt);
     const { worldInfoString, worldInfoBefore, worldInfoAfter, worldInfoExamples, worldInfoDepth, outletEntries, worldInfoActivation } = await perfTrace.measureAsync('world-info', () => getWorldInfoPrompt(chatForWI, this_max_context, dryRun, globalScanData));
+    promptSubphaseStartedAt = perfTrace.start();
     setExtensionPrompt(inject_ids.QUIET_PROMPT, '', extension_prompt_types.IN_PROMPT, 0, true);
     const includeActivatedWorldInfo = !agentMode || resolvedAgentContextPolicy.includeActivatedWorldInfo;
     const promptWorldInfoBefore = includeActivatedWorldInfo ? worldInfoBefore : '';
@@ -6212,6 +6244,7 @@ async function GenerateInternalCore(type, { automatic_trigger, force_name2, quie
     }
 
     await perfTrace.measureAsync('after-data-listeners', () => eventSource.emit(event_types.GENERATE_AFTER_DATA, generate_data, dryRun));
+    perfTrace.end('prompt-finalization', promptSubphaseStartedAt);
     perfTrace.end('prompt-assembly', promptAssemblyStartedAt);
 
     if (dryRun) {
