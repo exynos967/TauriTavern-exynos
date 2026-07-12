@@ -7,7 +7,7 @@ import { extension_settings, getContext } from './extensions.js';
 import { NOTE_MODULE_NAME, metadata_keys, shouldWIAddPrompt } from './authors-note.js';
 import { isMobile } from './RossAscends-mods.js';
 import { FILTER_TYPES, FilterHelper } from './filters.js';
-import { getTokenCountAsync } from './tokenizers.js';
+import { getTokenCountAsync, getTokenCountsAsync } from './tokenizers.js';
 import { power_user } from './power-user.js';
 import { getTagKeyForEntity } from './tags.js';
 import { debounce_timeout, GENERATION_TYPE_TRIGGERS } from './constants.js';
@@ -5243,7 +5243,14 @@ async function checkWorldInfoInternal(chat, maxContext, isDryRun, globalScanData
 
         let ignoresBudget = newEntries.filter(e => e.ignoreBudget).length;
 
-        for (const entry of newEntries) {
+        const prefetchedTokenCounts = new Map();
+        const canPrefetchTokenCount = entry => !entry.ignoreBudget
+            && (!entry.useProbability || entry.probability === 100)
+            && !String(entry.content ?? '').includes('{')
+            && !String(entry.content ?? '').includes('<');
+
+        for (let entryIndex = 0; entryIndex < newEntries.length; entryIndex++) {
+            const entry = newEntries[entryIndex];
             ignoresBudget -= (entry.ignoreBudget ? 1 : 0);
             if (token_budget_overflowed && !entry.ignoreBudget) {
                 if (ignoresBudget > 0) {
@@ -5285,9 +5292,32 @@ async function checkWorldInfoInternal(chat, maxContext, isDryRun, globalScanData
             entry.content = substituteParams(entry.content);
             newContent += `${entry.content}\n`;
 
+            if (canPrefetchTokenCount(entry) && !prefetchedTokenCounts.has(entry)) {
+                const batchEntries = [];
+                const batchPrefixes = [];
+                let batchContent = newContent;
+
+                for (let batchIndex = entryIndex; batchIndex < newEntries.length && batchEntries.length < 8; batchIndex++) {
+                    const batchEntry = newEntries[batchIndex];
+                    if (!canPrefetchTokenCount(batchEntry)) {
+                        break;
+                    }
+                    if (batchIndex > entryIndex) {
+                        batchContent += `${batchEntry.content}\n`;
+                    }
+                    batchEntries.push(batchEntry);
+                    batchPrefixes.push(batchContent);
+                }
+
+                const batchCounts = await perfTrace.measureAsync('token-count', () => getTokenCountsAsync(batchPrefixes));
+                batchEntries.forEach((batchEntry, index) => prefetchedTokenCounts.set(batchEntry, batchCounts[index]));
+            }
+
             const newContentTokens = entry.ignoreBudget
                 ? 0
-                : await perfTrace.measureAsync('token-count', () => getTokenCountAsync(newContent));
+                : prefetchedTokenCounts.has(entry)
+                    ? prefetchedTokenCounts.get(entry)
+                    : await perfTrace.measureAsync('token-count', () => getTokenCountAsync(newContent));
             if (!entry.ignoreBudget && (textToScanTokens + newContentTokens) >= budget) {
                 if (!token_budget_overflowed) {
                     console.debug('[WI] --- BUDGET OVERFLOW CHECK ---');

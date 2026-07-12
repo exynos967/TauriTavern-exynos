@@ -667,6 +667,27 @@ function counterWrapperOpenAIAsync(text) {
     return countTokensOpenAIAsync(message, true);
 }
 
+/**
+ * Gets exact token counts for multiple strings using the active tokenizer.
+ * Results preserve input order and match individual getTokenCountAsync calls.
+ * @param {string[]} strings Strings to tokenize.
+ * @param {number | undefined} padding Optional padding tokens.
+ * @returns {Promise<number[]>} Token counts in input order.
+ */
+export async function getTokenCountsAsync(strings, padding = undefined) {
+    if (!Array.isArray(strings)) {
+        throw new TypeError('getTokenCountsAsync expects an array');
+    }
+
+    if (main_api === 'openai' && padding !== power_user.token_padding) {
+        const messages = strings.map(text => ({ role: 'system', content: text }));
+        const counts = await countOpenAIMessageTokensBatchAsync(messages);
+        return counts.map((count, index) => strings[index]?.length ? count - 1 : 0);
+    }
+
+    return Promise.all(strings.map(text => getTokenCountAsync(text, padding)));
+}
+
 export function getTokenizerModel(settings = null) {
     const oai_settings = settings ?? current_oai_settings;
     // OpenAI models always provide their own tokenizer
@@ -1070,6 +1091,31 @@ export function countTokensOpenAI(messages, full = false) {
  */
 export async function countTokensOpenAIAsync(messages, full = false, settings = null) {
     const model = getTokenizerModel(settings);
+
+    if (!Array.isArray(messages)) {
+        messages = [messages];
+    }
+
+    if (model === 'claude') {
+        full = true;
+    }
+
+    const counts = await countOpenAIMessageTokensBatchAsync(messages, settings);
+    let token_count = counts.reduce((total, count) => total + count, -1);
+
+    if (!full) token_count -= 2;
+
+    return token_count;
+}
+
+/**
+ * Counts OpenAI-style messages independently in one batch while preserving order.
+ * @param {object[]} messages Messages to count independently.
+ * @param {ChatCompletionSettings|null} settings Optional model settings.
+ * @returns {Promise<number[]>} Per-message token counts.
+ */
+async function countOpenAIMessageTokensBatchAsync(messages, settings = null) {
+    const model = getTokenizerModel(settings);
     const tokenizerEndpoint = `/api/tokenizers/openai/count-batch?model=${model}`;
     const legacyTokenizerEndpoint = `/api/tokenizers/openai/count?model=${model}`;
     const cacheState = getTokenCacheState(resolveTokenCacheChatId());
@@ -1077,32 +1123,26 @@ export async function countTokensOpenAIAsync(messages, full = false, settings = 
         await cacheState.loadPromise;
     }
     const cacheObject = cacheState.cache;
-
-    if (!Array.isArray(messages)) {
-        messages = [messages];
-    }
-
-    let token_count = -1;
-
-    if (model === 'claude') {
-        full = true;
-    }
+    const counts = new Array(messages.length);
 
     const cacheMisses = [];
     const cacheMissKeys = [];
+    const cacheMissIndices = [];
 
-    for (const message of messages) {
+    for (let index = 0; index < messages.length; index++) {
+        const message = messages[index];
         const hash = getStringHash(JSON.stringify(message));
         const cacheKey = `${model}-${hash}`;
         const cachedCount = cacheObject[cacheKey];
 
         if (typeof cachedCount === 'number') {
-            token_count += cachedCount;
+            counts[index] = cachedCount;
         }
 
         else {
             cacheMisses.push(message);
             cacheMissKeys.push(cacheKey);
+            cacheMissIndices.push(index);
         }
     }
 
@@ -1156,7 +1196,7 @@ export async function countTokensOpenAIAsync(messages, full = false, settings = 
                 count = guesstimateOpenAiMessageTokenCount(cacheMisses[i]);
             }
 
-            token_count += count;
+            counts[cacheMissIndices[i]] = count;
             if (shouldCache) {
                 cacheObject[cacheMissKeys[i]] = count;
                 cacheState.dirty = true;
@@ -1164,9 +1204,7 @@ export async function countTokensOpenAIAsync(messages, full = false, settings = 
         }
     }
 
-    if (!full) token_count -= 2;
-
-    return token_count;
+    return counts;
 }
 
 /**
