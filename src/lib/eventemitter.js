@@ -142,12 +142,18 @@ EventEmitter.prototype.emit = async function (event) {
         length = listeners.length;
 
         for (i = 0; i < length; i++) {
+            const listener = listeners[i];
+            const profiler = globalThis.__TAURITAVERN_PERF_EVENT_LISTENER__;
+            const startedAt = profiler ? performance.now() : 0;
             try {
-                await listeners[i].apply(this, args);
+                await listener.apply(this, args);
             }
             catch (err) {
                 console.error(err);
                 console.trace('Error in event listener');
+            }
+            finally {
+                profiler?.({ event, listener, index: i, durationMs: performance.now() - startedAt });
             }
         }
     }

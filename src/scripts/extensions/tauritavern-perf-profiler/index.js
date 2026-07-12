@@ -6,6 +6,9 @@ const MAX_RECORDS = 20;
 const MAX_FRAME_SAMPLES = 600;
 const MAX_CHAT_LOADS = 20;
 const MAX_SLOW_INTERACTIONS = 100;
+const MAX_OPERATIONS = 100;
+const MAX_SLOW_LISTENERS = 100;
+const SLOW_LISTENER_THRESHOLD_MS = 8;
 
 const state = {
     capturing: false,
@@ -17,6 +20,8 @@ const state = {
     interactionObserver: null,
     chatLoads: [],
     slowInteractions: [],
+    operations: [],
+    slowListeners: [],
     rafId: null,
     lastFrameAt: null,
     panel: null,
@@ -260,7 +265,7 @@ function installMeasureObserver() {
     try {
         state.measureObserver = new PerformanceObserver(list => {
             for (const entry of list.getEntries()) {
-                if (!['tt:generation:total', 'tt:world-info:total', 'tt:stream:total', 'tt:chat-load:total'].includes(entry.name)) {
+                if (!entry.name.startsWith('tt:') || !entry.name.endsWith(':total')) {
                     continue;
                 }
 
@@ -276,6 +281,19 @@ function installMeasureObserver() {
                     });
                     if (state.chatLoads.length > MAX_CHAT_LOADS) {
                         state.chatLoads.splice(0, state.chatLoads.length - MAX_CHAT_LOADS);
+                    }
+                    renderStatus();
+                    continue;
+                }
+
+                if (!['tt:generation:total', 'tt:world-info:total', 'tt:stream:total'].includes(entry.name)) {
+                    state.operations.push({
+                        name: entry.name.slice(3, -6),
+                        startedAt: finiteRound(entry.startTime),
+                        ...trace,
+                    });
+                    if (state.operations.length > MAX_OPERATIONS) {
+                        state.operations.splice(0, state.operations.length - MAX_OPERATIONS);
                     }
                     renderStatus();
                     continue;
@@ -303,6 +321,25 @@ function installMeasureObserver() {
     } catch {
         state.measureObserver = null;
     }
+}
+
+function installEventListenerProfiler() {
+    globalThis.__TAURITAVERN_PERF_EVENT_LISTENER__ = ({ event, listener, index, durationMs }) => {
+        if (!state.capturing || durationMs < SLOW_LISTENER_THRESHOLD_MS) {
+            return;
+        }
+
+        state.slowListeners.push({
+            event: String(event),
+            listener: listener?.name || '(anonymous)',
+            index: Number(index),
+            durationMs: finiteRound(durationMs),
+            observedAt: finiteRound(now()),
+        });
+        if (state.slowListeners.length > MAX_SLOW_LISTENERS) {
+            state.slowListeners.splice(0, state.slowListeners.length - MAX_SLOW_LISTENERS);
+        }
+    };
 }
 
 function installInteractionObserver() {
@@ -340,6 +377,7 @@ function startCapture() {
     installLongTaskObserver();
     installMeasureObserver();
     installInteractionObserver();
+    installEventListenerProfiler();
     startFrameSampler();
     renderStatus();
 }
@@ -351,12 +389,13 @@ function stopCapture() {
 
     finalizeRecord('capture-stopped');
     state.capturing = false;
+    delete globalThis.__TAURITAVERN_PERF_EVENT_LISTENER__;
     renderStatus();
 }
 
 function snapshot() {
     return {
-        schemaVersion: 2,
+        schemaVersion: 3,
         exportedAt: new Date().toISOString(),
         userAgent: navigator.userAgent,
         viewport: {
@@ -368,6 +407,8 @@ function snapshot() {
         records: structuredClone(state.records),
         chatLoads: structuredClone(state.chatLoads),
         slowInteractions: structuredClone(state.slowInteractions),
+        operations: structuredClone(state.operations),
+        slowListeners: structuredClone(state.slowListeners),
     };
 }
 
@@ -402,6 +443,7 @@ function renderStatus() {
     const streamPhases = record.stream.trace?.phases ?? {};
     const generationPhases = record.generation.trace?.phases ?? {};
     const lastChatLoad = state.chatLoads.at(-1);
+    const lastOperation = state.operations.at(-1);
     state.status.innerHTML = `
         <div><b>${state.current ? '正在生成' : '最近一次'}</b> #${record.id} · ${record.type}</div>
         <div>总耗时：${formatMs(duration)}</div>
@@ -411,6 +453,7 @@ function renderStatus() {
         <div>首块：${formatMs(record.stream.firstChunkAtMs)} · 流块：${record.stream.chunks}</div>
         <div>Prompt：${formatMs(generationPhases['prompt-assembly']?.durationMs)} · 请求：${formatMs(generationPhases['request-dispatch']?.durationMs ?? generationPhases['request-response']?.durationMs)}</div>
         <div>聊天载入：${formatMs(lastChatLoad?.durationMs)} · 慢交互：${state.slowInteractions.length}</div>
+        <div>最近操作：${lastOperation?.name ?? '-'} / ${formatMs(lastOperation?.durationMs)} · 慢监听：${state.slowListeners.length}</div>
         <div>长任务：${record.responsiveness.longTasks} 次 / ${formatMs(record.responsiveness.maxLongTaskMs)}</div>
     `;
 }
@@ -460,6 +503,8 @@ function createUi() {
         state.records = [];
         state.chatLoads = [];
         state.slowInteractions = [];
+        state.operations = [];
+        state.slowListeners = [];
         renderStatus();
     });
 
