@@ -15,6 +15,7 @@ import { replaceMesTextHtmlWithRuntimePolicy } from './scripts/tauri/message/mes
 import { getCodeHighlightCoordinator } from './scripts/tauri/perf/code-highlight-coordinator.js';
 import { isInlineDrawerContentOpen, setInlineDrawerContentOpen } from './scripts/tauri/perf/inline-drawer-motion.js';
 import { createPerformanceTrace } from './scripts/tauri/perf/performance-trace.js';
+import { getMessageRenderBatches, shouldFollowStreamingOutput } from './scripts/tauri/perf/message-render-batches.js';
 import { getStreamingRenderInterval } from './scripts/tauri/perf/streaming-render-policy.js';
 import {
     isTauriChatPayloadTransportEnabled,
@@ -1841,6 +1842,37 @@ export async function replaceCurrentChat() {
 /** @type {{ state: any, promise: Promise<void> } | null} */
 let windowedShowMoreMessagesPending = null;
 
+async function prependWindowedMessageElements(messages, showMoreButton, prevHeight, keepAnchor) {
+    const renderBatches = getMessageRenderBatches(messages.length);
+    let insertionAnchor = showMoreButton[0] ?? null;
+
+    for (const [batchIndex, batch] of renderBatches.entries()) {
+        const fragment = document.createDocumentFragment();
+        let lastElement = null;
+        for (let id = batch.start; id < batch.end; id += 1) {
+            const messageElement = updateMessageElement(chat[id], { messageId: id });
+            lastElement = messageElement[0];
+            fragment.appendChild(lastElement);
+        }
+
+        if (insertionAnchor) {
+            insertionAnchor.after(fragment);
+        } else {
+            chatElement[0].prepend(fragment);
+        }
+        insertionAnchor = lastElement;
+
+        if (keepAnchor) {
+            const newHeight = chatElement.prop('scrollHeight');
+            chatElement.scrollTop(newHeight - prevHeight);
+        }
+
+        if (batchIndex < renderBatches.length - 1) {
+            await new Promise(resolve => requestAnimationFrame(resolve));
+        }
+    }
+}
+
 export async function showMoreMessages(messagesToLoad = null) {
     const windowState = getWindowedChatState();
     if (windowState && isTauriChatPayloadTransportEnabled()) {
@@ -1894,19 +1926,8 @@ export async function showMoreMessages(messagesToLoad = null) {
             if (this_edit_mes_id >= 0) {
                 this_edit_mes_id = Number(this_edit_mes_id) + messages.length;
             }
-
-            const fragment = document.createDocumentFragment();
-            for (let id = 0; id < messages.length; id += 1) {
-                const messageElement = updateMessageElement(chat[id], { messageId: id });
-                fragment.appendChild(messageElement[0]);
-            }
-
-            if (showMoreButton[0]) {
-                showMoreButton[0].after(fragment);
-            } else {
-                chatElement[0].prepend(fragment);
-            }
-
+            updateViewMessageIds(messages.length);
+            await prependWindowedMessageElements(messages, showMoreButton, prevHeight, isButtonInView);
             updateViewMessageIds(0);
             refreshSwipeButtons();
 
@@ -1920,11 +1941,6 @@ export async function showMoreMessages(messagesToLoad = null) {
 
             if (!hasMoreBefore) {
                 showMoreButton.remove();
-            }
-
-            if (isButtonInView) {
-                const newHeight = chatElement.prop('scrollHeight');
-                chatElement.scrollTop(newHeight - prevHeight);
             }
 
             applyStylePins();
@@ -4332,7 +4348,7 @@ class StreamingProcessor {
         unblockGeneration();
     }
 
-    async onStartStreaming(text) {
+    async onStartStreaming(text, followStreamingOutput = true) {
         const continueOnReasoning = !!(this.type === 'continue' && this.promptReasoning.prefixReasoning);
         if (continueOnReasoning) {
             this.reasoningHandler.initContinue(this.promptReasoning);
@@ -4350,7 +4366,9 @@ class StreamingProcessor {
             this.markUIGenStarted();
         }
         hideSwipeButtons({ hideCounters: true });
-        scrollChatToBottom({ waitForFrame: true });
+        if (followStreamingOutput) {
+            scrollChatToBottom({ waitForFrame: true });
+        }
         return messageId;
     }
 
@@ -4588,9 +4606,9 @@ class StreamingProcessor {
 
     async generate() {
         if (this.messageId == -1) {
-            this.messageId = await this.onStartStreaming(this.firstMessageText);
+            const followStreamingOutput = shouldFollowStreamingOutput(scrollLock);
+            this.messageId = await this.onStartStreaming(this.firstMessageText, followStreamingOutput);
             await delay(1); // delay for message to be rendered
-            scrollLock = false;
         }
 
         // Stopping strings are expensive to calculate, especially with macros enabled. To remove stopping strings
@@ -7012,7 +7030,7 @@ export async function sendMessageAsUser(messageText, messageBias, insertAt = nul
         await saveChatConditional();
         const chat_id = (chat.length - 1);
         await eventSource.emit(event_types.MESSAGE_SENT, chat_id);
-        addOneMessage(message);
+        addOneMessage(message, { scroll: !scrollLock });
         await eventSource.emit(event_types.USER_MESSAGE_RENDERED, chat_id);
     }
 
@@ -7798,7 +7816,7 @@ export async function saveReply({ type, getMessage, fromStreaming = false, title
             }
             const chat_id = (chat.length - 1);
             !fromStreaming && await eventSource.emit(event_types.MESSAGE_RECEIVED, chat_id, type);
-            addOneMessage(chat[chat_id], { type: 'swipe' });
+            addOneMessage(chat[chat_id], { type: 'swipe', scroll: !scrollLock });
             !fromStreaming && await eventSource.emit(event_types.CHARACTER_MESSAGE_RENDERED, chat_id, type);
         } else {
             lastMessage.mes = getMessage;
@@ -7826,7 +7844,7 @@ export async function saveReply({ type, getMessage, fromStreaming = false, title
         }
         const chat_id = (chat.length - 1);
         !fromStreaming && await eventSource.emit(event_types.MESSAGE_RECEIVED, chat_id, type);
-        addOneMessage(chat[chat_id], { type: 'swipe' });
+        addOneMessage(chat[chat_id], { type: 'swipe', scroll: !scrollLock });
         !fromStreaming && await eventSource.emit(event_types.CHARACTER_MESSAGE_RENDERED, chat_id, type);
     } else if (type === 'appendFinal') {
         oldMessage = lastMessage.mes;
@@ -7851,7 +7869,7 @@ export async function saveReply({ type, getMessage, fromStreaming = false, title
         }
         const chat_id = (chat.length - 1);
         !fromStreaming && await eventSource.emit(event_types.MESSAGE_RECEIVED, chat_id, type);
-        addOneMessage(chat[chat_id], { type: 'swipe' });
+        addOneMessage(chat[chat_id], { type: 'swipe', scroll: !scrollLock });
         !fromStreaming && await eventSource.emit(event_types.CHARACTER_MESSAGE_RENDERED, chat_id, type);
     } else {
         console.debug('entering chat update routine for non-swipe post');
@@ -7897,7 +7915,7 @@ export async function saveReply({ type, getMessage, fromStreaming = false, title
         const chat_id = (chat.length - 1);
 
         !fromStreaming && await eventSource.emit(event_types.MESSAGE_RECEIVED, chat_id, type);
-        addOneMessage(chat[chat_id]);
+        addOneMessage(chat[chat_id], { scroll: !scrollLock });
         !fromStreaming && await eventSource.emit(event_types.CHARACTER_MESSAGE_RENDERED, chat_id, type);
     }
 

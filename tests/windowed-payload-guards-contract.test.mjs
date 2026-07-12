@@ -57,9 +57,7 @@ test('windowed payload: showMoreMessages implements single-flight + CAS commit',
 test('windowed payload: showMoreMessages reindexes DOM and shifts windowed save counters after prepend', async () => {
     const source = await readFile(path.join(REPO_ROOT, 'src/script.js'), 'utf8');
 
-    const showMoreStart = source.indexOf('export async function showMoreMessages');
-    assert.ok(showMoreStart >= 0);
-    const slice = source.slice(showMoreStart, showMoreStart + 3000);
+    const slice = extractFunctionBody(source, 'export async function showMoreMessages');
 
     assert.match(slice, /updateViewMessageIds\(\s*0\s*\)\s*;/);
     assert.match(
