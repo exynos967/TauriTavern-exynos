@@ -1,6 +1,6 @@
 # TauriTavern Performance Profiler
 
-Local-only performance diagnostics for world-info scanning and streamed generation.
+Local-only performance diagnostics for generation, chat loading, slow interactions, world-info scanning, and streamed generation.
 
 ## Usage
 
@@ -15,5 +15,8 @@ When TauriTavern's optional core tracing is available, reports also include:
 
 - World info prefetch, cache collection/cloning, sorting, entry preparation/hash, final clone, keyword scanning, token counting, inclusion groups, event listeners, and prompt building.
 - Streaming cleanup, reasoning updates, output regex, Markdown repair/rendering, sanitization, DOM commits, scrolling, and stream event listeners.
+- Generation setup, slash commands, extension listeners/interceptors, history regex, prompt assembly, request dispatch, and response waits.
+- Chat payload reads/parsing, state application, itemized prompt loading, message rendering, and chat-change listeners.
+- Slow browser interactions with input, processing, and presentation delays. Target metadata excludes input values and chat text.
 
 Core tracing is inactive unless this profiler is capturing or the built-in TauriTavern Perf HUD is enabled.
