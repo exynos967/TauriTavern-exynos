@@ -29,7 +29,7 @@ Tauri/Wry 只替换了外壳和后端。SillyTavern 前端、第三方扩展、�
 2. **`ST-Prompt-Template` 的决定性排序问题已通过 Android 实机复测。** `qf/jf/Gf` 关键监听器平均从 3,230.6 ms 降至 134.5 ms，最大值从 3,671.3 ms 降至 193.3 ms。
 3. **插件不再是当前第一性能问题。** 插件全部慢监听器聚合时间从 65.37 s 降至 2.42 s，下降 96.3%；最新样本中已没有稳定的插件级数秒冻结。
 4. **当前第一热点转为 TauriTavern 核心世界书路径。** 5,363 条世界书的 dry run 世界书阶段平均 1.97 s、最大 4.08 s；聊天切换预热监听器最大 1.44 s。
-5. **`JS-Slash-Runner` 是当前最明显的第三方次级热点。** `chat_completion_prompt_ready` 8 次累计 1.87 s、最大 526.4 ms，但自动化命令包含用户等待，不能把嵌套总时长全部解释为 CPU 卡顿。
+5. **报告归属到 `JS-Slash-Runner` 的次级热点实际来自用户 iframe 脚本。** 压缩函数 `r` 对应其通用事件桥接包装器，本身只校验参数并调用用户 listener；`chat_completion_prompt_ready` 8 次累计 1.87 s、最大 526.4 ms，具体慢脚本尚未被现有埋点识别。
 6. **流式、DOM/RSS 与持久化仍需继续处理。** 新样本平均约 2.2 万 DOM 节点，流式全量格式化仍是持续功耗来源；发送按钮出现一次 877.8 ms 首帧延迟，按钮 handler 本身接近 0 ms。
 
 ### 2.2 当前严重度排名
@@ -37,7 +37,7 @@ Tauri/Wry 只替换了外壳和后端。SillyTavern 前端、第三方扩展、�
 | 排名 | 热点 | 状态 | 用户表现 | 最新证据 |
 | ---: | --- | --- | --- | --- |
 | 1（P0） | TauriTavern 世界书准备、扫描与 Token | 实机证实 | 大世界书生成前冻结，聊天切换变慢 | dry run 平均 1.97 s、最大 4.08 s；切换预热最大 1.44 s |
-| 2（P1） | `JS-Slash-Runner` prompt-ready 自动化 | 实机证实，CPU 归因待拆分 | 发送到请求 dispatch 出现额外等待 | 8 次累计 1.87 s，平均 233.7 ms、最大 526.4 ms |
+| 2（P1） | 经 `JS-Slash-Runner` 桥接的用户 iframe listener | 实机证实，具体脚本待归属 | 发送到请求 dispatch 出现额外等待 | prompt-ready 8 次累计 1.87 s，平均 233.7 ms、最大 526.4 ms |
 | 3（P1） | 流式全量格式化与 Token 事件 | 实机证实 | 长输出期间持续发热、偶发掉帧 | 4 次生成 14,436 chunks；格式化约 1.84 s，Token 事件约 1.48 s |
 | 4（P1） | 常驻 DOM 与 WebView 内存基线 | 实机证实 | 菜单和抽屉偶发迟钝，长期使用余量不足 | DOM 平均 22,122；RSS 平均 357.0 MiB、峰值 573.2 MiB |
 | 5（P2） | `ST-Prompt-Template` 剩余工作 | 实机证实，已非首要问题 | 消息渲染和聊天切换仍有百毫秒成本 | 关键监听器平均 134.5 ms、最大 193.3 ms |
@@ -225,7 +225,29 @@ TauriTavern 核心的世界书排序只有约 1 ms，**不是** `ST-Prompt-Templ
 
 插件排序修复后，这条核心预热路径已经成为聊天切换的第一热点。该结果随后被丢弃，但调用会填充原始世界书缓存并触发 `WORLDINFO_ENTRIES_LOADED`。不能简单删除或后台化，否则可能改变扩展观察顺序。更合理的后续方向是把“原始 world prefetch”和“生成专用 prepare/hash/clone”拆开，再验证首次生成是否仍完整执行相同事件和结果。
 
-### 4.4 流式生成
+### 4.4 JS-Slash-Runner 事件桥接
+
+source map 将性能报告中的 `dist/index.js:191:28447`、压缩函数 `r` 精确映射到 `src/function/event.ts` 的 `register_listener_wrapper()`。该函数只负责：
+
+1. 检查 iframe listener 是否仍在注册表中；
+2. 将消息事件的 message ID 规范为数字；
+3. 调用 iframe 用户脚本注册的 listener，并原样返回结果。
+
+最新样本中相关聚合：
+
+| 事件 | 次数 | 累计 | 最大 | 同步累计 | await 累计 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `chat_completion_prompt_ready` | 8 | 1.87 s | 526.4 ms | 2.9 ms | 1.87 s |
+| `worldinfo_entries_loaded` | 18 | 828.2 ms | 78.2 ms | 222.7 ms | 605.5 ms |
+| `chat_id_changed` | 7 | 554.7 ms | 167.3 ms | 132.7 ms | 422.0 ms |
+
+因此，现有数据只能证明“某些 iframe 用户脚本 listener 较慢”，不能证明 JS-Slash-Runner 桥接算法本身较慢。Slash Command 自动化样本集中在采集开始后约 107–137 秒，而上述 prompt-ready 慢监听窗口位于约 437–854 秒，两者没有时间重叠；`/buttons` 用户等待不是这些监听器的根因。
+
+源码审计另行发现 `eventOn/eventMakeFirst/eventMakeLast/eventOnce` 返回的 `stop()` 使用包装函数反查原始 listener，导致手动卸载失效。JS-Slash-Runner 分支 `fix/event-listener-stop` 的提交 `a7238de8` 已修复并覆盖 6 项测试，生产构建通过。该修复降低长时间运行后残留或重复回调风险，但**不应被描述为本次 526.4 ms 的直接优化**。
+
+下一步需要把 iframe 名称或稳定匿名 script ID 附加到事件桥接注册元数据，才能在不采集脚本内容的前提下定位具体用户脚本。不能并行、缓存或跳过通用桥接，因为这会改变脚本顺序、变量状态和最终请求体。
+
+### 4.5 流式生成
 
 最新 4 次真实生成：
 
@@ -239,7 +261,7 @@ TauriTavern 核心的世界书排序只有约 1 ms，**不是** `ST-Prompt-Templ
 
 低风险候选：流式统计只维护首时间、末时间和计数，不再保存每个 chunk 的 timestamp。高风险候选包括增量 Markdown/sanitize、跳过 `STREAM_TOKEN_RECEIVED` 或强制覆盖用户 FPS，暂不实施。
 
-### 4.5 DOM 与内存
+### 4.6 DOM 与内存
 
 - DOM 平均 22,122，P95 22,246，单次峰值 38,142；
 - 同屏消息平均约 10 条；
@@ -250,7 +272,7 @@ TauriTavern 核心的世界书排序只有约 1 ms，**不是** `ST-Prompt-Templ
 
 单次峰值不能证明内存泄漏。卸载隐藏设置页或扩展 DOM 可能破坏表单状态、同步 DOM 查询和 MutationObserver；必须先补模块级节点归属、detached node 和固定循环后的 idle 回落数据。
 
-### 4.6 设置与持久化
+### 4.7 设置与持久化
 
 | 路径 | 次数 | 平均 | 最大 |
 | --- | ---: | ---: | ---: |
@@ -306,12 +328,12 @@ TauriTavern 核心的世界书排序只有约 1 ms，**不是** `ST-Prompt-Templ
 4. 只有建立完整 revision/失效模型后才考虑 prepared-entry cache；
 5. 用冻结输入双执行比较激活条目、顺序、Token budget 和最终请求体。
 
-### P1：拆分 JS-Slash-Runner 自动化等待
+### P1：归属 iframe 用户脚本等待
 
-1. 区分命令同步 CPU、嵌套命令、UI `buttons` 用户等待和网络等待；
-2. 对 `chat_completion_prompt_ready` 的 8 次调用建立同一自动化 sourceKey 关联；
-3. 不把等待用户选择的 `buttons` 总时长当作主线程 CPU；
-4. 不改变命令顺序、变量可见性和 abort 语义。
+1. 让桥接注册元数据携带稳定匿名 iframe/script ID，不采集脚本正文或名称；
+2. 分别记录 listener 同步 CPU、Promise 等待和嵌套事件；
+3. 将 Slash Command sourceKey 与事件 listener identity 分开，避免错误关联；
+4. 不改变事件顺序、变量可见性、用户等待和 abort 语义。
 
 ### P1：降低流式稳态 CPU
 
@@ -437,7 +459,7 @@ optimization-9 样本 SHA-256：`6BB9093AA27964B4FBE0315B88A9F31835AD63E569B66C6
 4. 当前设备未暴露电池温度、电流和电压；
 5. RSS 峰值不能单独证明内存泄漏；
 6. 最新样本没有触发 history prepend，也没有覆盖大型聊天快速连续翻页；
-7. Slash Command 的 `buttons`、嵌套 `run/if` 会包含用户等待，自动化累计时长不能直接当作 CPU time；
+7. Slash Command 的 `buttons`、嵌套 `run/if` 会包含用户等待，自动化累计时长不能直接当作 CPU time；本轮这些命令与 prompt-ready 慢监听没有时间重叠；
 8. 插件排序结果已通过本地等价测试，但最新样本没有保存最终请求体快照，不能仅凭性能报告完成端到端功能等价证明。
 
 ## 11. 埋点缺口
@@ -446,19 +468,20 @@ Schema 9 已覆盖 generation、世界书、流式、聊天加载、交互、网
 
 1. Prompt Manager dry run 的触发来源、合并次数、排队时间和实际执行次数；
 2. Tokenizer 队列深度、排队时间、native 执行时间和 exact dedupe 命中；
-3. 世界书 prepared-entry cache 所需的 revision 和失效来源；
-4. DOM 节点模块归属和 detached node；
-5. settings 请求调用方、字节数和磁盘阶段；
-6. history prepend 的图片/iframe hydration 和滚动锚点偏移；
-7. profiler 开启/关闭的 CPU、内存和输入延迟 A/B；
-8. 设备允许时的电池温度、电流和电压。
+3. iframe 事件桥接的稳定匿名 script ID、同步 CPU 和 Promise 等待归属；
+4. 世界书 prepared-entry cache 所需的 revision 和失效来源；
+5. DOM 节点模块归属和 detached node；
+6. settings 请求调用方、字节数和磁盘阶段；
+7. history prepend 的图片/iframe hydration 和滚动锚点偏移；
+8. profiler 开启/关闭的 CPU、内存和输入延迟 A/B；
+9. 设备允许时的电池温度、电流和电压。
 
 ## 12. 最终结论
 
 - TauriTavern 的 dry run 并发和世界书 Token 风暴已经得到数量级改善；
 - `ST-Prompt-Template` 的比较器全数组重复扫描已经修复并通过 Android 复测，关键监听器平均下降 95.8%；
 - 当前第一性能问题转为 TauriTavern 核心世界书对象准备、扫描、Token 和聊天切换预热；
-- `JS-Slash-Runner` 是当前最明显的第三方次级热点，但必须先剥离用户等待再决定是否优化；
+- `JS-Slash-Runner` 只是在当前埋点中承载慢 listener 的桥接归属；真正热点是尚未识别的 iframe 用户脚本，必须补匿名 script identity 后再优化；
 - 流式稳态 CPU 和 DOM/RSS 基线仍会造成发热与按钮 presentation delay；
 - settings 和持久化是次级异步成本，不能用有状态风险的 TTL 缓存草率处理；
 - 后续优化必须以最终请求体、世界书激活、消息 HTML、变量状态、事件顺序和 viewport 等价为前提。
