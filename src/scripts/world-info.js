@@ -26,6 +26,7 @@ import { accountStorage } from './util/AccountStorage.js';
 import { getOrCreatePersonaDescriptor, setPersonaDescription, user_avatar } from './personas.js';
 import { normalizeWorldInfoActivationBatch } from './tauritavern/agent/world-info-activation.js';
 import { createPerformanceTrace } from './tauri/perf/performance-trace.js';
+import { prepareWorldInfoEntries } from './world-info-entry-prepare.js';
 
 export const world_info_insertion_strategy = {
     evenly: 0,
@@ -4812,14 +4813,7 @@ export async function getSortedEntries(perfTrace = null) {
             return [...chatLore.sort(sortFn), ...personaLore.sort(sortFn), ...sorted];
         });
 
-        // Calculate hash and parse decorators. Split maps to preserve old hashes.
-        entries = perfTrace.measure('entries-prepare', () => entries.map((entry) => {
-            const [decorators, content] = parseDecorators(entry.content || '');
-            return { ...entry, decorators, content };
-        }).map((entry) => {
-            const hash = getStringHash(JSON.stringify(entry));
-            return { ...entry, hash };
-        }));
+        entries = perfTrace.measure('entries-prepare', () => prepareWorldInfoEntries(entries, parseDecorators, getStringHash));
 
         console.debug(`[WI] Found ${entries.length} world lore entries. Sorted by strategy`, Object.entries(world_info_insertion_strategy).find((x) => x[1] === world_info_character_strategy));
 
