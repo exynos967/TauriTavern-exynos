@@ -89,3 +89,30 @@ test('OpenAI token count batch route still invokes backend for empty warm batch'
     assert.deepEqual(await response.json(), { token_counts: [] });
     assert.deepEqual(capturedDto, { model: 'gpt-4o', requests: [] });
 });
+
+test('OpenAI token prefix count route preserves compact prefix parts', async () => {
+    let capturedDto;
+    const router = createRouteRegistry();
+    registerOpenAiTokenizerRoutes(
+        router,
+        {
+            async safeInvoke(command, { dto }) {
+                assert.equal(command, 'count_openai_token_prefixes');
+                capturedDto = dto;
+                return { token_counts: [8, 13] };
+            },
+        },
+        { jsonResponse },
+    );
+
+    const response = await router.handle({
+        method: 'POST',
+        path: '/api/tokenizers/openai/count-prefix-batch',
+        url: new URL('http://tauri.local/api/tokenizers/openai/count-prefix-batch?model=gpt-4o'),
+        body: { base: 'base', suffixes: [' one', ' two'], stop_at: 12 },
+    });
+
+    assert.equal(response.status, 200);
+    assert.deepEqual(await response.json(), { token_counts: [8, 13] });
+    assert.deepEqual(capturedDto, { model: 'gpt-4o', base: 'base', suffixes: [' one', ' two'], stop_at: 12 });
+});

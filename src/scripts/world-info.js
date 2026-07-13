@@ -7,7 +7,7 @@ import { extension_settings, getContext } from './extensions.js';
 import { NOTE_MODULE_NAME, metadata_keys, shouldWIAddPrompt } from './authors-note.js';
 import { isMobile } from './RossAscends-mods.js';
 import { FILTER_TYPES, FilterHelper } from './filters.js';
-import { getTokenCountAsync, getTokenCountsAsync } from './tokenizers.js';
+import { getTokenCountAsync, getTokenPrefixCountsAsync } from './tokenizers.js';
 import { power_user } from './power-user.js';
 import { getTagKeyForEntity } from './tags.js';
 import { debounce_timeout, GENERATION_TYPE_TRIGGERS } from './constants.js';
@@ -5290,26 +5290,24 @@ async function checkWorldInfoInternal(chat, maxContext, isDryRun, globalScanData
 
             // Substitute macros inline, for both this checking and also future processing
             entry.content = substituteParams(entry.content);
+            const batchBaseContent = newContent;
             newContent += `${entry.content}\n`;
 
             if (canPrefetchTokenCount(entry) && !prefetchedTokenCounts.has(entry)) {
                 const batchEntries = [];
-                const batchPrefixes = [];
-                let batchContent = newContent;
+                const batchSuffixes = [];
 
-                for (let batchIndex = entryIndex; batchIndex < newEntries.length && batchEntries.length < 8; batchIndex++) {
+                for (let batchIndex = entryIndex; batchIndex < newEntries.length && batchEntries.length < 64; batchIndex++) {
                     const batchEntry = newEntries[batchIndex];
                     if (!canPrefetchTokenCount(batchEntry)) {
                         break;
                     }
-                    if (batchIndex > entryIndex) {
-                        batchContent += `${batchEntry.content}\n`;
-                    }
                     batchEntries.push(batchEntry);
-                    batchPrefixes.push(batchContent);
+                    batchSuffixes.push(`${batchEntry.content}\n`);
                 }
 
-                const batchCounts = await perfTrace.measureAsync('token-count', () => getTokenCountsAsync(batchPrefixes));
+                const remainingBudget = budget - textToScanTokens;
+                const batchCounts = await perfTrace.measureAsync('token-count', () => getTokenPrefixCountsAsync(batchBaseContent, batchSuffixes, undefined, remainingBudget));
                 batchEntries.forEach((batchEntry, index) => prefetchedTokenCounts.set(batchEntry, batchCounts[index]));
             }
 

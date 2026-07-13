@@ -688,6 +688,85 @@ export async function getTokenCountsAsync(strings, padding = undefined) {
     return Promise.all(strings.map(text => getTokenCountAsync(text, padding)));
 }
 
+/**
+ * Gets exact token counts for cumulative prefixes without sending every expanded prefix.
+ * @param {string} base Initial prefix shared by every result.
+ * @param {string[]} suffixes Suffixes appended cumulatively in input order.
+ * @param {number | undefined} padding Optional padding tokens.
+ * @param {number | undefined} stopAt Stop after the first exact count at or above this value.
+ * @returns {Promise<number[]>} Token counts for each cumulative prefix.
+ */
+export async function getTokenPrefixCountsAsync(base, suffixes, padding = undefined, stopAt = undefined) {
+    if (typeof base !== 'string' || !Array.isArray(suffixes)) {
+        throw new TypeError('getTokenPrefixCountsAsync expects a string base and an array of suffixes');
+    }
+
+    if (main_api === 'openai' && padding !== power_user.token_padding && globalThis.__TAURITAVERN__) {
+        const model = getTokenizerModel();
+        const cacheState = getTokenCacheState(resolveTokenCacheChatId());
+        if (cacheState.loadPromise) {
+            await cacheState.loadPromise;
+        }
+
+        const cacheKeys = [];
+        const cachedCounts = [];
+        let prefix = base;
+        let allCached = true;
+        for (let index = 0; index < suffixes.length; index++) {
+            prefix += suffixes[index];
+            const message = { role: 'system', content: prefix };
+            const cacheKey = `${model}-${getStringHash(JSON.stringify(message))}`;
+            cacheKeys.push(cacheKey);
+            const cachedCount = cacheState.cache[cacheKey];
+            cachedCounts.push(cachedCount);
+            allCached &&= typeof cachedCount === 'number';
+            if (allCached && Number.isFinite(stopAt) && cachedCount - 1 >= stopAt) {
+                return suffixes.map((_, countIndex) => cachedCounts[Math.min(countIndex, index)] - 1);
+            }
+        }
+
+        if (allCached) {
+            return cachedCounts.map(count => count - 1);
+        }
+
+        try {
+            const data = await jQuery.ajax({
+                async: true,
+                type: 'POST',
+                url: `/api/tokenizers/openai/count-prefix-batch?model=${model}`,
+                data: JSON.stringify({ base, suffixes, stop_at: stopAt }),
+                dataType: 'json',
+                contentType: 'application/json',
+            });
+
+            if (Array.isArray(data?.token_counts) && data.token_counts.length === suffixes.length) {
+                for (let index = 0; index < data.token_counts.length; index++) {
+                    const count = data.token_counts[index];
+                    const numericCount = Number(count);
+                    if (Number.isFinite(numericCount)) {
+                        cacheState.cache[cacheKeys[index]] = numericCount;
+                        cacheState.dirty = true;
+                    }
+                    if (Number.isFinite(stopAt) && numericCount - 1 >= stopAt) {
+                        break;
+                    }
+                }
+                return data.token_counts.map(count => Number(count) - 1);
+            }
+        } catch (error) {
+            console.warn('OpenAI token prefix count request failed, using exact batch fallback:', error);
+        }
+    }
+
+    const prefixes = [];
+    let prefix = base;
+    for (const suffix of suffixes) {
+        prefix += suffix;
+        prefixes.push(prefix);
+    }
+    return getTokenCountsAsync(prefixes, padding);
+}
+
 export function getTokenizerModel(settings = null) {
     const oai_settings = settings ?? current_oai_settings;
     // OpenAI models always provide their own tokenizer
