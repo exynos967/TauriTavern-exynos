@@ -10,6 +10,7 @@ const MAX_CHAT_LOADS = 20;
 const MAX_SLOW_INTERACTIONS = 100;
 const MAX_OPERATIONS = 100;
 const MAX_UNATTRIBUTED_TRACES = 50;
+const MAX_AUTOMATION_SAMPLES = 300;
 const MAX_SLOW_LISTENERS = 100;
 const SLOW_LISTENER_THRESHOLD_MS = 8;
 
@@ -29,6 +30,9 @@ const state = {
     slowInteractions: [],
     operations: [],
     unattributedTraces: [],
+    automationSamples: [],
+    automationObserved: 0,
+    automationDropped: 0,
     slowListeners: [],
     slowListenerObserved: 0,
     slowListenerDropped: 0,
@@ -428,6 +432,35 @@ function installEventListenerProfiler() {
     };
 }
 
+function installAutomationProfiler() {
+    globalThis.__TAURITAVERN_PERF_AUTOMATION__ = sample => {
+        if (!state.capturing || !sample || typeof sample !== 'object') {
+            return;
+        }
+
+        state.automationObserved += 1;
+        state.automationSamples.push({
+            ...structuredClone(sample),
+            durationMs: finiteRound(sample.durationMs),
+            observedAt: finiteRound(now()),
+        });
+        if (state.automationSamples.length > MAX_AUTOMATION_SAMPLES) {
+            const dropped = state.automationSamples.length - MAX_AUTOMATION_SAMPLES;
+            state.automationSamples.splice(0, dropped);
+            state.automationDropped += dropped;
+        }
+    };
+}
+
+function getAutomationProfilerSnapshot() {
+    return {
+        observed: state.automationObserved,
+        stored: state.automationSamples.length,
+        dropped: state.automationDropped,
+        samples: structuredClone(state.automationSamples),
+    };
+}
+
 function getListenerProfilerSnapshot() {
     return {
         thresholdMs: SLOW_LISTENER_THRESHOLD_MS,
@@ -481,6 +514,7 @@ function startCapture() {
     installInteractionObserver();
     installEventListenerProfiler();
     installTraceStartProfiler();
+    installAutomationProfiler();
     startFrameSampler();
     runtimeDiagnostics.start();
     renderStatus();
@@ -495,13 +529,14 @@ function stopCapture() {
     state.capturing = false;
     delete globalThis.__TAURITAVERN_PERF_EVENT_LISTENER__;
     delete globalThis.__TAURITAVERN_PERF_TRACE_STARTED__;
+    delete globalThis.__TAURITAVERN_PERF_AUTOMATION__;
     runtimeDiagnostics.stop();
     renderStatus();
 }
 
 function snapshot() {
     return {
-        schemaVersion: 6,
+        schemaVersion: 7,
         exportedAt: new Date().toISOString(),
         userAgent: navigator.userAgent,
         viewport: {
@@ -517,6 +552,7 @@ function snapshot() {
         unattributedTraces: structuredClone(state.unattributedTraces),
         slowListeners: structuredClone(state.slowListeners),
         listenerProfiler: getListenerProfilerSnapshot(),
+        automationProfiler: getAutomationProfilerSnapshot(),
         diagnostics: runtimeDiagnostics.snapshot(),
     };
 }
@@ -630,6 +666,9 @@ function createUi() {
         state.slowListenerObserved = 0;
         state.slowListenerDropped = 0;
         state.listenerAggregates.clear();
+        state.automationSamples = [];
+        state.automationObserved = 0;
+        state.automationDropped = 0;
         runtimeDiagnostics.clear();
         renderStatus();
     });

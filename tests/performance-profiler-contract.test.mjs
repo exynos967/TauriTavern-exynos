@@ -9,7 +9,7 @@ const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..
 test('performance report exports generic operations and slow event listeners', async () => {
     const source = await readFile(path.join(REPO_ROOT, 'src/scripts/extensions/tauritavern-perf-profiler/index.js'), 'utf8');
 
-    assert.match(source, /schemaVersion:\s*6/);
+    assert.match(source, /schemaVersion:\s*7/);
     assert.match(source, /operations:\s*structuredClone\(state\.operations\)/);
     assert.match(source, /slowListeners:\s*structuredClone\(state\.slowListeners\)/);
     assert.match(source, /diagnostics:\s*runtimeDiagnostics\.snapshot\(\)/);
@@ -21,6 +21,26 @@ test('performance report exports generic operations and slow event listeners', a
     assert.match(source, /__TAURITAVERN_PERF_TRACE_STARTED__/);
     assert.match(source, /generationTraceRunId/);
     assert.match(source, /unattributedTraces:\s*structuredClone\(state\.unattributedTraces\)/);
+    assert.match(source, /automationProfiler:\s*getAutomationProfilerSnapshot\(\)/);
+    assert.match(source, /__TAURITAVERN_PERF_AUTOMATION__/);
+});
+
+test('automation diagnostics omit script text and command arguments', async () => {
+    const [autoExecuteSource, quickReplySetSource, slashClosureSource] = await Promise.all([
+        readFile(path.join(REPO_ROOT, 'src/scripts/extensions/quick-reply/src/AutoExecuteHandler.js'), 'utf8'),
+        readFile(path.join(REPO_ROOT, 'src/scripts/extensions/quick-reply/src/QuickReplySet.js'), 'utf8'),
+        readFile(path.join(REPO_ROOT, 'src/scripts/slash-commands/SlashCommandClosure.js'), 'utf8'),
+    ]);
+
+    assert.match(autoExecuteSource, /kind:\s*'quick-reply-auto'/);
+    assert.match(autoExecuteSource, /sourceKey:/);
+    assert.doesNotMatch(autoExecuteSource, /message:\s*qr\.message/);
+    assert.doesNotMatch(autoExecuteSource, /label:\s*qr\.label/);
+    assert.match(quickReplySetSource, /enumerable:\s*false/);
+    assert.match(slashClosureSource, /kind:\s*'slash-command'/);
+    assert.match(slashClosureSource, /command:\s*executor\.name/);
+    assert.doesNotMatch(slashClosureSource, /args:\s*args/);
+    assert.doesNotMatch(slashClosureSource, /value:\s*value/);
 });
 
 test('performance profiler captures interaction latency and heat signals only while enabled', async () => {

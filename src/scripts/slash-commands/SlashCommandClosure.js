@@ -12,6 +12,9 @@ import { SlashCommandExecutionError } from './SlashCommandExecutionError.js';
 import { SlashCommandExecutor } from './SlashCommandExecutor.js';
 import { SlashCommandNamedArgumentAssignment } from './SlashCommandNamedArgumentAssignment.js';
 import { SlashCommandScope } from './SlashCommandScope.js';
+import { createPrivacySafeId, getAutomationProfiler, reportAutomationSample } from '../tauri/perf/automation-profiler.js';
+
+const UUID_SOURCE_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 export class SlashCommandClosure {
     /** @type {SlashCommandScope} */ scope;
@@ -435,7 +438,25 @@ export class SlashCommandClosure {
                     this.debugController.isStepping = false || this.debugController.isSteppingInto;
                 }
                 try {
-                    this.scope.pipe = await executor.command.callback(args, value ?? '');
+                    const profiler = getAutomationProfiler();
+                    const startedAt = profiler ? performance.now() : 0;
+                    let success = false;
+                    try {
+                        this.scope.pipe = await executor.command.callback(args, value ?? '');
+                        success = true;
+                    } finally {
+                        if (profiler) {
+                            const source = String(executor.source ?? '');
+                            reportAutomationSample(profiler, {
+                                kind: 'slash-command',
+                                command: executor.name || executor.command?.name || '(unknown)',
+                                sourceKind: UUID_SOURCE_PATTERN.test(source) ? 'anonymous' : 'named',
+                                sourceKey: source && !UUID_SOURCE_PATTERN.test(source) ? createPrivacySafeId(source) : null,
+                                success,
+                                durationMs: performance.now() - startedAt,
+                            });
+                        }
+                    }
                 } catch (ex) {
                     throw new SlashCommandExecutionError(ex, ex.message, executor.name, executor.start, executor.end, this.fullText.slice(executor.start, executor.end), this.fullText);
                 }
