@@ -12,6 +12,7 @@ const MAX_OPERATIONS = 100;
 const MAX_UNATTRIBUTED_TRACES = 50;
 const MAX_AUTOMATION_SAMPLES = 300;
 const MAX_STREAM_FORMAT_SAMPLES = 300;
+const MAX_HISTORY_PREPEND_SAMPLES = 200;
 const MAX_SLOW_LISTENERS = 100;
 const SLOW_LISTENER_THRESHOLD_MS = 8;
 
@@ -37,6 +38,9 @@ const state = {
     streamFormatSamples: [],
     streamFormatObserved: 0,
     streamFormatDropped: 0,
+    historyPrependSamples: [],
+    historyPrependObserved: 0,
+    historyPrependDropped: 0,
     slowListeners: [],
     slowListenerObserved: 0,
     slowListenerDropped: 0,
@@ -494,6 +498,38 @@ function getStreamFormatProfilerSnapshot() {
     };
 }
 
+function installHistoryPrependProfiler() {
+    globalThis.__TAURITAVERN_PERF_HISTORY_PREPEND__ = sample => {
+        if (!state.capturing || !sample || typeof sample !== 'object') {
+            return;
+        }
+
+        state.historyPrependObserved += 1;
+        state.historyPrependSamples.push({
+            ...structuredClone(sample),
+            renderDurationMs: finiteRound(sample.renderDurationMs),
+            domCommitDurationMs: finiteRound(sample.domCommitDurationMs),
+            anchorDurationMs: finiteRound(sample.anchorDurationMs),
+            totalDurationMs: finiteRound(sample.totalDurationMs),
+            observedAt: finiteRound(now()),
+        });
+        if (state.historyPrependSamples.length > MAX_HISTORY_PREPEND_SAMPLES) {
+            const dropped = state.historyPrependSamples.length - MAX_HISTORY_PREPEND_SAMPLES;
+            state.historyPrependSamples.splice(0, dropped);
+            state.historyPrependDropped += dropped;
+        }
+    };
+}
+
+function getHistoryPrependProfilerSnapshot() {
+    return {
+        observed: state.historyPrependObserved,
+        stored: state.historyPrependSamples.length,
+        dropped: state.historyPrependDropped,
+        samples: structuredClone(state.historyPrependSamples),
+    };
+}
+
 function getListenerProfilerSnapshot() {
     return {
         thresholdMs: SLOW_LISTENER_THRESHOLD_MS,
@@ -549,6 +585,7 @@ function startCapture() {
     installTraceStartProfiler();
     installAutomationProfiler();
     installStreamFormatProfiler();
+    installHistoryPrependProfiler();
     startFrameSampler();
     runtimeDiagnostics.start();
     renderStatus();
@@ -565,13 +602,14 @@ function stopCapture() {
     delete globalThis.__TAURITAVERN_PERF_TRACE_STARTED__;
     delete globalThis.__TAURITAVERN_PERF_AUTOMATION__;
     delete globalThis.__TAURITAVERN_PERF_STREAM_FORMAT__;
+    delete globalThis.__TAURITAVERN_PERF_HISTORY_PREPEND__;
     runtimeDiagnostics.stop();
     renderStatus();
 }
 
 function snapshot() {
     return {
-        schemaVersion: 8,
+        schemaVersion: 9,
         exportedAt: new Date().toISOString(),
         userAgent: navigator.userAgent,
         viewport: {
@@ -589,6 +627,7 @@ function snapshot() {
         listenerProfiler: getListenerProfilerSnapshot(),
         automationProfiler: getAutomationProfilerSnapshot(),
         streamFormatProfiler: getStreamFormatProfilerSnapshot(),
+        historyPrependProfiler: getHistoryPrependProfilerSnapshot(),
         diagnostics: runtimeDiagnostics.snapshot(),
     };
 }
@@ -708,6 +747,9 @@ function createUi() {
         state.streamFormatSamples = [];
         state.streamFormatObserved = 0;
         state.streamFormatDropped = 0;
+        state.historyPrependSamples = [];
+        state.historyPrependObserved = 0;
+        state.historyPrependDropped = 0;
         runtimeDiagnostics.clear();
         renderStatus();
     });

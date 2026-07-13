@@ -6,7 +6,7 @@
     "js": "index.js",
     "css": "style.css",
     "author": "TauriTavern",
-    "version": "0.7.0",
+    "version": "0.8.0",
     "description": "Local performance diagnostics with source-attributed event listeners, runtime heat signals, generation, chat loading, world info, and streaming.",
     "hooks": {
         "activate": "init"

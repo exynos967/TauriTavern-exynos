@@ -29,6 +29,8 @@ test('message insertion and generation delegate scrolling to one controller', as
     assert.match(source, /chatScrollController\.requestScroll\(\{ waitForFrame, force \}\)/);
     assert.match(source, /const shouldScroll = scroll && chatScrollController\.shouldFollowOutput\(\)/);
     assert.match(source, /mediaScrollBehavior = chatScrollController\.shouldFollowOutput\(\)/);
+    assert.match(source, /getHistoryPrependProfiler\(\)/);
+    assert.match(source, /reportHistoryPrependBatch\(historyProfiler, \{/);
     assert.match(source, /if \(!chatScrollController\.shouldFollowOutput\(\)\) \{\s*return;/);
     assert.doesNotMatch(source, /followStreamingOutput/);
 });

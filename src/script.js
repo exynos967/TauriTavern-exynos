@@ -17,6 +17,7 @@ import { isInlineDrawerContentOpen, setInlineDrawerContentOpen } from './scripts
 import { createPerformanceTrace } from './scripts/tauri/perf/performance-trace.js';
 import { createChatScrollController } from './scripts/tauri/perf/chat-scroll-controller.js';
 import { getMessageRenderBatches } from './scripts/tauri/perf/message-render-batches.js';
+import { getHistoryPrependProfiler, reportHistoryPrependBatch } from './scripts/tauri/perf/history-prepend-profiler.js';
 import { getStreamingRenderInterval } from './scripts/tauri/perf/streaming-render-policy.js';
 import { diffStreamingPhases, isStreamingFormatProfilingEnabled, reportStreamingFormatSample } from './scripts/tauri/perf/streaming-format-profiler.js';
 import {
@@ -1847,33 +1848,65 @@ let windowedShowMoreMessagesPending = null;
 async function prependWindowedMessageElements(messages, showMoreButton, prevHeight, keepAnchor, perfTrace) {
     const renderBatches = getMessageRenderBatches(messages.length);
     let insertionAnchor = showMoreButton[0] ?? null;
+    const historyProfiler = getHistoryPrependProfiler();
 
     for (const [batchIndex, batch] of renderBatches.entries()) {
+        const batchStartedAt = historyProfiler ? performance.now() : 0;
+        const heightBefore = historyProfiler ? Number(chatElement.prop('scrollHeight')) || 0 : 0;
+        let renderDurationMs = 0;
+        let domCommitDurationMs = 0;
+        let anchorDurationMs = 0;
         const fragment = document.createDocumentFragment();
         let lastElement = null;
         perfTrace.measure('messages-render', () => {
+            const startedAt = historyProfiler ? performance.now() : 0;
             for (let id = batch.start; id < batch.end; id += 1) {
                 const messageElement = updateMessageElement(chat[id], { messageId: id });
                 lastElement = messageElement[0];
                 fragment.appendChild(lastElement);
             }
+            renderDurationMs = historyProfiler ? performance.now() - startedAt : 0;
         });
 
         perfTrace.measure('dom-commit', () => {
+            const startedAt = historyProfiler ? performance.now() : 0;
             if (insertionAnchor) {
                 insertionAnchor.after(fragment);
             } else {
                 chatElement[0].prepend(fragment);
             }
+            domCommitDurationMs = historyProfiler ? performance.now() - startedAt : 0;
         });
         insertionAnchor = lastElement;
 
         if (keepAnchor) {
+            const startedAt = historyProfiler ? performance.now() : 0;
             const newHeight = chatElement.prop('scrollHeight');
             chatElement.scrollTop(newHeight - prevHeight);
+            anchorDurationMs = historyProfiler ? performance.now() - startedAt : 0;
         }
 
-        if (batchIndex < renderBatches.length - 1) {
+        const yieldedFrame = batchIndex < renderBatches.length - 1;
+        if (historyProfiler) {
+            const heightAfter = Number(chatElement.prop('scrollHeight')) || heightBefore;
+            reportHistoryPrependBatch(historyProfiler, {
+                traceRunId: perfTrace.runId,
+                batchIndex,
+                batchCount: renderBatches.length,
+                startIndex: batch.start,
+                endIndex: batch.end,
+                messageCount: batch.end - batch.start,
+                keepAnchor: Boolean(keepAnchor),
+                yieldedFrame,
+                renderDurationMs,
+                domCommitDurationMs,
+                anchorDurationMs,
+                totalDurationMs: performance.now() - batchStartedAt,
+                heightDelta: heightAfter - heightBefore,
+            });
+        }
+
+        if (yieldedFrame) {
             await new Promise(resolve => requestAnimationFrame(resolve));
         }
     }
