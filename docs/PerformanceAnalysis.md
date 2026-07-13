@@ -4,8 +4,8 @@
 
 - 分析日期：2026-07-13
 - 当前分支：`optimization/worldbook-streaming`
-- 当前基线提交：`2d3a4b75`（Schema 9 性能监视器）
-- 最新采样构建：TauriTavern 2.1.1 `arm64-v8a` optimization-9 Perf Release
+- 当前分析提交：`104c5a7b`（optimization-10）
+- 最新采样构建：TauriTavern 2.1.1 `arm64-v8a` optimization-10 Perf Release
 - 主要测试设备：Android 15，360 x 792 CSS px，DPR 4，Android System WebView 149
 - 报告性质：现场性能证据、当前实现状态与优化优先级
 
@@ -18,9 +18,62 @@
 
 本文不把“原生客户端”视为性能保证。Tauri/Wry 替换了 Node/Express 后端和浏览器外壳，但 SillyTavern 前端、扩展生态、DOM、正则、Markdown、事件监听器和大量状态管理仍运行在 WebView 主线程。只要这些工作没有减少或移出关键路径，原生外壳不会自动消除卡顿和发热。
 
-## Schema 9 最新实测结论
+## Schema 9 optimization-10 复测结论
 
-本节基于 `tauritavern-perf-2026-07-13T09-18-01.076Z.json`，文件 SHA-256 为 `6BB9093AA27964B4FBE0315B88A9F31835AD63E569B66C63D20C8F75FDA989FC`。原始报告保留在本地，不提交仓库。本节是当前优化决策的权威基线；后文 Schema 4 结论保留作历史对照，若两者冲突，以本节为准。
+本节基于 `tauritavern-perf-2026-07-13T12-04-56.407Z.json`，文件 SHA-256 为 `42FE59A5E04C9AFE8C96030AF36401EE57F97CA87E2CC0FB899599F56EB70142`。采集持续 21.77 分钟，包含 13 次 dry run、5 次真实生成、4 次聊天切换、900 个健康样本和 132 个慢监听器观测。原始报告保留在本地，不提交仓库。
+
+### 复测结论
+
+1. **optimization-10 已消除 dry run 并发计算风暴。** 13 次 dry run 的实际 generation 区间没有任何重叠；不能再用记录被下一次操作标记为 `superseded` 前的生命周期作为执行耗时。
+2. **世界书 token 优化在更重负载下仍显著生效。** 本次每次都扫描 5,363 条世界书。同规模 dry run 的 token 平均耗时从 1,295.6 ms 降至 459.8 ms，世界书总阶段从 2,517.9 ms 降至 1,331.3 ms，generation 从 3,069.0 ms 降至 1,665.3 ms。
+3. **当前第一性能问题已明确转移到 `ST-Prompt-Template`。** 它占已聚合慢监听器时间的 93.9%，而且 `qf/jf/Gf` 已由稳定注册来源精确归属，不再是未知候选。
+4. **聊天切换卡顿不在楼层渲染。** 4 次聊天切换总计 3.48–4.66 s，其中监听器 3.25–4.36 s；消息渲染仅 58.2–85.1 ms。
+5. **CPU、主线程和内存指标整体改善，但仍有发热余量。** 进程 CPU 平均值从 63.1% 降至 56.0%，P95 从 88.0% 降至 78.9%；主线程 busy ratio 平均值从 10.9% 降至 8.6%；每秒长任务时间平均值从 133.3 ms 降至 86.5 ms。采样场景并非严格等时 A/B，这些指标只能视为方向性证据。
+
+### optimization-9 与 optimization-10 对照
+
+| 指标 | optimization-9 | optimization-10 | 结论 |
+| --- | ---: | ---: | --- |
+| dry run 实际执行区间重叠 | 存在多任务重叠 | 0 次 | latest-wins 与原生串行策略生效 |
+| 5,363 条 dry run token 平均 | 1,295.6 ms | 459.8 ms | 降低 64.5% |
+| 5,363 条 dry run 世界书平均 | 2,517.9 ms | 1,331.3 ms | 降低 47.1% |
+| 5,363 条 dry run generation 平均 | 3,069.0 ms | 1,665.3 ms | 降低 45.7% |
+| 真实生成 token 平均 | 1,451.3 ms | 285.2 ms | 新样本世界书规模更大，仍降低 80.4% |
+| 真实生成世界书平均 | 2,463.3 ms | 1,177.5 ms | 降低 52.2% |
+| 进程 CPU 平均 / P95 | 63.1% / 88.0% | 56.0% / 78.9% | 方向性改善 |
+| RSS 平均 | 357.8 MiB | 335.1 MiB | 降低 6.3%，峰值仍达 592.6 MiB |
+| DOM 平均 | 21,816 | 21,112 | 仍有约 2.1 万节点基线 |
+
+optimization-9 的全部 dry run token 平均值为 12.42 s，而本次为 0.46 s；但旧样本包含不同世界书规模和严重并发争用，因此不能把 96.3% 的差值全部解释为单次算法提速。同为 5,363 条的对照更保守，也更能代表单任务收益。
+
+### 当前最严重：ST-Prompt-Template 串行监听器
+
+监听器稳定身份已经把此前压缩后的函数名定位到 `scripts/extensions/third-party/ST-Prompt-Template/dist/index.js`：
+
+| 监听器 | 事件 | 次数 | 累计耗时 | 最大单次 | 主要表现 |
+| --- | --- | ---: | ---: | ---: | --- |
+| `qf` | `character_message_rendered` | 5 | 17.14 s | 3.54 s | AI 消息完成后卡住 |
+| `qf` | `user_message_rendered` | 4 | 14.00 s | 3.57 s | 点击发送后卡住 |
+| `qf` | `message_updated` | 2 | 4.47 s | 2.27 s | 消息更新后卡住 |
+| `jf` | `chat_completion_settings_ready` | 5 | 16.41 s | 3.51 s | 请求体准备阶段被延后 |
+| `Gf` | `chat_id_changed` | 4 | 12.60 s | 3.67 s | 切换聊天后楼层已渲染但操作未完成 |
+
+上述 `qf/jf/Gf` 五组累计 64.61 s，占全部慢监听器聚合时间的 92.8%；`ST-Prompt-Template` 全部监听器累计 65.37 s，占 93.9%。其中 65.21 s 是 Promise 等待，只有 156.8 ms 是同步执行，说明卡顿来自插件监听器等待链，而不是 Perf 计时本身或 EventEmitter 循环开销。
+
+不能据此全局并行 EventEmitter。下一步应先审计 `ST-Prompt-Template` 对应监听器内部是否重复执行设置读取、模板解析、变量刷新或保存，并只在插件内部合并可证明等价的工作。
+
+### 仍存在的次级热点
+
+- 世界书单次仍需 0.76–3.02 s；扫描阶段平均 455.0 ms、最高 795.9 ms。token 已不再是持续数十秒的灾难点，但 5,363 条对象准备、扫描和克隆仍会造成主线程长任务。
+- 4 次聊天切换中，监听器占总耗时 93.5%，消息渲染只占 1.7%。`scripts/world-info.js` 的聊天切换监听器累计 1.68 s、最大 459.4 ms，是第一方次级目标。
+- 5 次真实生成共接收 16,960 chunks。流式格式化采样 P50 从 4.5 ms 降至 1.1 ms，DOM commit P50 从 0.8 ms 降至 0.2 ms；由于两次输出内容和保留样本窗口不同，只能证明当前单次格式化较轻，不能证明总能耗同比降低相同比例。
+- 扩展菜单出现一次 688 ms Event Timing，其中 click handler 仅 4.2 ms、presentation delay 656.2 ms，更像布局、绘制或同帧其他任务阻塞。发送按钮诊断样本的第二帧为 70.7–86.0 ms，没有发现发送按钮自身执行数秒的证据。
+- `/api/settings/get` 15 次累计 15.62 s、平均 1.04 s、最大 6.17 s；`settings/patch` 14 次累计 5.27 s。它们是可观测的次级成本，但当前没有证据证明网络等待本身冻结主线程。
+- RSS 平均 335.1 MiB、峰值 592.6 MiB，DOM 平均 21,112；尚不能据单次峰值判定泄漏，仍需固定循环后的 idle 回落测试。
+
+## Schema 9 optimization-9 基线结论
+
+本节基于 `tauritavern-perf-2026-07-13T09-18-01.076Z.json`，文件 SHA-256 为 `6BB9093AA27964B4FBE0315B88A9F31835AD63E569B66C63D20C8F75FDA989FC`。原始报告保留在本地，不提交仓库。本节保留 optimization-9 的优化前历史基线；若与上一节 optimization-10 复测结论冲突，以复测结论为准。
 
 ### 严重度排名
 
@@ -567,6 +620,8 @@ Android 上 `/proc/stat` 和 `/sys/class/power_supply/...` 可能受权限或设
 | 冷启动内存 | token cache 按 chat 分桶；Prompt Inspector index/record 懒加载 | 降低 whole-load；扩展/UI DOM 基线仍高 |
 | 设置与资源 | 设置聚合缓存、增量 patch、Host Resource 条件缓存 | 降低重复磁盘读取；前端仍存在重复 settings/version 请求 |
 
+optimization-10 实机已经验证 13 次 dry run 的实际 generation 区间无重叠。表中的“当前 1 个 + 最新 1 个”是调度状态上限，不代表两个任务同时执行；最新任务只会在当前任务完成后开始。
+
 ### 7.1 Schema 9 后新增优化
 
 | 提交 | 改动 | 不变契约 | 验证 |
@@ -590,36 +645,34 @@ Android 上 `/proc/stat` 和 `/sys/class/power_supply/...` 可能受权限或设
 6. 页面在极少消息时仍有约 2.1 万 DOM 节点和高 RSS 基线；
 7. 扩展版本检查和完整 settings 读取存在重复调用。
 
-### 8.2 高置信但尚未精确归属
+### 8.2 高置信但尚未完全拆解
 
-1. `qf/jf/Gf` 很可能来自启用的扩展或自动化脚本，但函数名已压缩；
-2. Quick Reply 自动执行链与慢事件覆盖高度一致，是重点候选，但不能在没有稳定 ID 的情况下定罪；
-3. 扩展菜单约 500 ms 延迟很可能来自面板展开后的布局/样式/内容初始化，而不是 click handler；
-4. 持续流式格式化是发热来源之一，但缺少 CPU 与温度数据，无法量化占比。
+1. `qf/jf/Gf` 已精确归属 `third-party/ST-Prompt-Template`，但压缩 bundle 尚未拆出内部哪一步造成约 2–4 秒 Promise 等待；
+2. `scripts/world-info.js` 的聊天切换监听器单次最高 459.4 ms，需要继续拆分加载、修复和 UI 刷新阶段；
+3. 扩展菜单 688 ms 延迟很可能来自面板展开后的布局/样式/内容初始化或同帧其他任务，而不是仅 4.2 ms 的 click handler；
+4. 持续流式格式化是发热来源之一，但设备仍未暴露温度和电流，无法量化能耗占比。
 
 ### 8.3 尚未证实
 
 1. RSS 波动是否为内存泄漏；
 2. 最新长聊天快速翻页是否仍会长时间空白；
-3. 3.79 秒未知点击对应哪个控件或插件；
-4. 某个具体第三方扩展是否独占 `qf/jf/Gf`；
+3. optimization-10 的 688 ms 扩展菜单 presentation delay 是否由布局、绘制还是同帧扩展任务造成；
+4. `ST-Prompt-Template` 的 `qf/jf/Gf` 内部具体是哪项读取、解析、变量刷新或保存占用等待时间；
 5. 网络请求是否直接阻塞主线程。当前多数网络耗时与主线程冻结没有一一对应。
 
 ## 9. 后续优先级
 
-### P0：先把慢监听器定位到源码和插件
+### P0：拆解并优化 ST-Prompt-Template 慢监听器
 
-埋点应在监听器注册时分配稳定 ID，记录：
+稳定身份埋点已经完成源码和插件归属。下一阶段应针对 `qf/jf/Gf` 内部继续记录：
 
-- event 名；
-- 注册顺序；
-- 模块/扩展 ID；
-- 开发态源码位置，Release 至少记录构建期模块 ID；
-- 是否由 `on`、`once`、`makeFirst`、`makeLast` 注册；
-- 当前 generation/chat-load run ID；
-- 自身同步耗时、await 耗时和嵌套 slash/Quick Reply 命令耗时。
+- 模板解析、变量读取和替换时间；
+- settings、角色、世界书和用户文件读取时间；
+- 保存、刷新和嵌套事件时间；
+- 同一 generation/chat-load 内相同输入的重复执行次数；
+- 可合并工作的精确输入 identity 与失效条件。
 
-定位后，针对具体监听器选择缓存、减少重复读取、拆分 UI 更新、合并保存或在契约允许处让出帧。不得全局并行化 EventEmitter。
+只在插件内部针对具体阶段选择 single-flight、减少重复读取、拆分 UI 更新、合并等价保存或在契约允许处让出帧。不得全局并行化 EventEmitter，也不得跳过任何一次会改变最终请求体或变量状态的监听器。
 
 ### P0：守住世界书现有收益并继续减少重复计数
 
@@ -765,7 +818,7 @@ Android 上 `/proc/stat` 和 `/sys/class/power_supply/...` 可能受权限或设
 
 Schema 9 已补齐监听器稳定身份、插件来源、Slash Command、Quick Reply、流式分阶段、history prepend、runId 强关联和 Android CPU fallback。剩余缺口为：
 
-1. Prompt Manager dry run 的触发来源、合并次数、排队时间与实际执行次数；
+1. Prompt Manager dry run 的触发来源、合并次数、排队时间与实际执行次数；现有时间区间已能验证无并发，但不能计算合并率；
 2. Tokenizer invoke 队列深度、排队时间、native 执行时间和 exact dedupe 命中；
 3. DOM 节点按核心模块/扩展归属，以及 detached node 计数；
 4. settings 请求体字节数、序列化、磁盘读取、修复和写入阶段；
@@ -779,11 +832,11 @@ Schema 9 已补齐监听器稳定身份、插件来源、Slash Command、Quick R
 
 TauriTavern 的性能问题已经从“缺少证据的整体卡顿”收敛为几个明确热点：
 
-- 世界书历史灾难级 token 计数已经显著改善，但大世界书仍有 1–5 秒准备成本；
-- 当前最严重、最直接的冻结来自串行事件监听链，而不是发送按钮、消息 DOM 或模型网络；
-- 流式限频降低了刷新次数，但重复格式化仍会造成持续 CPU 压力和发热；
+- optimization-10 已消除 dry run 执行重叠，并把 5,363 条世界书 dry run 的 token 平均耗时降至 459.8 ms；历史灾难级并发 token 风暴不再是当前首要问题；
+- 当前最严重、最直接的冻结来自 `ST-Prompt-Template` 的 `qf/jf/Gf` 串行监听链，而不是发送按钮、消息 DOM 或模型网络；
+- 流式单次格式化和 DOM commit 样本明显变轻，但重复全量格式化仍会形成持续 CPU 压力，能耗改善幅度尚未被温度/电流数据验证；
 - 高 DOM/RSS 基线使移动 WebView 缺少余量，扩展和复杂面板会进一步放大布局与 GC 成本；
 - 网络/IPC 的重复设置读取和扩展版本检查属于次级但可稳定回收的成本；
-- 现有埋点足以确定优化优先级，但必须补齐监听器归属和 Android 能耗数据，才能继续做精准优化。
+- 现有埋点已补齐监听器归属并足以确定优化优先级；下一步缺口是插件内部阶段与 Android 能耗数据。
 
-下一阶段应先定位并处理 `qf/jf/Gf` 对应的真实监听器，再继续降低流式稳态 CPU。此顺序对用户可见卡顿的收益最大，也比全局修改事件模型或重写渲染架构风险更低。
+下一阶段应先拆解并处理 `ST-Prompt-Template` 的 `qf/jf/Gf` 内部重复工作，再优化 `scripts/world-info.js` 的聊天切换监听器和世界书主线程扫描。此顺序对用户可见卡顿的收益最大，也比全局修改事件模型或重写渲染架构风险更低。
