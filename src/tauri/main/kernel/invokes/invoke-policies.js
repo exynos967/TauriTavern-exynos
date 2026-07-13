@@ -44,6 +44,7 @@ function countOpenAiTokensBatchKey(args) {
     return fnv1a32(json);
 }
 
+/** @param {any} args */
 function exactTokenizerRequestKey(args) {
     const dto = args?.dto ?? args ?? {};
     return JSON.stringify(dto);
