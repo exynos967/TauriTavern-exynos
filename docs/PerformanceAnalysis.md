@@ -4,7 +4,8 @@
 
 - 分析日期：2026-07-14
 - TauriTavern 分支：`optimization/performance`
-- 最新实测代码：`b8ca3364`（OpenAI prefix tokenizer 增量计数）
+- 埋点基线分支：`perf`
+- 最新实测运行时代码：`b8ca3364`（OpenAI prefix tokenizer 增量计数）
 - 最新实测构建：TauriTavern 2.1.1 `arm64-v8a` token-optimized Perf Release
 - 最新性能样本：`tauritavern-perf-2026-07-13T18-24-53.017Z.json`
 - 样本 SHA-256：`D4984BA278E60212F6FC8AE7CB52FDEC06CA43FDC0484C3A94CCC9AA26EB31E4`
@@ -15,8 +16,10 @@
 本文区分三类结论：
 
 1. **实机证实**：由 optimization-10 及后续 token-optimized 性能报告直接支持；
-2. **源码证实**：已从源码和构建产物确认机制或根因，但尚未建立完整实机对照；
+2. **契约验证**：已有自动化测试或新旧实现逐项等价测试，但缺少专项实机 A/B；
 3. **待验证**：只有趋势或候选解释，不能作为既定事实。
+
+`perf` 保存完整性能监视器和诊断埋点；`optimization/performance` 在其上承载运行时优化。文档提交不改变 APK 运行时代码，因此“当前分支 HEAD”和“最新实测运行时提交”需要分开理解。
 
 Tauri/Wry 只替换了外壳和后端。SillyTavern 前端、事件监听器、正则、Markdown、DOM 和状态管理仍运行在 WebView 中，因此“原生客户端”不等于这些工作自动变快。
 
@@ -26,36 +29,38 @@ Tauri/Wry 只替换了外壳和后端。SillyTavern 前端、事件监听器、�
 
 1. **TauriTavern 自身的 dry run 并发风暴已经解决。** optimization-10 的调度仍保持 latest-wins，没有重新出现并发执行证据。
 2. **OpenAI 世界书 prefix Token 重复扫描已得到实机确认改善。** prefix native 调用平均从 124.2 ms 降至 26.1 ms，P95 从 540 ms 降至 49 ms；高 Token 调用任务的 Token 阶段平均下降 57.7%。
-3. **当前第一持续功耗热点转为流式格式化与 Token 事件。** 新样本两次真实生成持续 183.3 s 和 280.5 s，累计处理 10,179 次 Token 事件和 2,713 次格式化更新；DOM/RSS、聊天切换和持久化仍是次级问题。
+3. **世界书条目准备已完成第一轮低风险收敛。** 5,363 条场景的 prepare 平均从 413.5 ms 降至最新样本的 200.6 ms，下降 51.5%；完整 entries 阶段平均降至 334.0 ms。
+4. **长聊天渲染、滚动所有权和发送/生成结束 viewport 已做结构性修复。** 自动化契约测试已覆盖楼层顺序、批次边界和 scroll lock；最新样本没有触发 history prepend，仍缺少 200–1,000 楼实机压力复测。
+5. **当前第一持续功耗热点是流式格式化与 Token 事件。** 新样本两次真实生成持续 183.3 s 和 280.5 s，累计处理 10,179 次 Token 事件和 2,713 次格式化更新；DOM/RSS、聊天切换和持久化仍是次级问题。
 
 ### 2.2 当前严重度排名
 
 | 排名 | 热点 | 状态 | 用户表现 | 最新证据 |
 | ---: | --- | --- | --- | --- |
 | 1（P0） | 流式全量格式化与 Token 事件 | 实机证实 | 长输出期间持续发热、偶发掉帧 | 2 次生成 10,179 次 Token 事件、2,713 次格式化；生成窗口 CPU 平均 46.4% |
-| 2（P1） | 世界书准备、扫描与 Token | 实机证实，已显著改善 | 大世界书生成前仍有短暂停顿 | 高 Token 调用任务世界书平均 1.46 s、最大 1.68 s；Token 平均 662.7 ms |
+| 2（P1） | 世界书扫描与剩余固定成本 | 实机证实，已显著改善 | 大世界书生成前仍有短暂停顿 | 高 Token 调用任务世界书平均 1.46 s、最大 1.68 s；entries 平均 334.0 ms |
 | 3（P1） | 常驻 DOM 与 WebView 内存基线 | 实机证实 | 菜单和抽屉偶发迟钝，长期使用余量不足 | DOM 平均 22,452；RSS 平均 477.8 MiB、峰值 643.3 MiB |
 | 4（P2） | 设置、角色和世界书持久化 | 实机证实，主线程影响未证实 | 打开页面、切换角色或保存额外等待 | 历史样本 settings/get 平均 1.04 s；characters/edit 平均 1.51 s |
-| 5（P2） | 长聊天连续翻页 | 待验证 | 快速滑动时楼层短暂空白 | 最新样本未触发 history prepend，缺少 200–1,000 楼专项复测 |
+| 5（P2） | 长聊天连续翻页 | 已优化，待专项实机验证 | 快速滑动时楼层短暂空白 | 已分批渲染并集中滚动控制；最新样本未触发 history prepend |
 
 ## 3. TauriTavern 当前热点
 
 ### 3.1 世界书条目准备
 
-最新样本的 18 次世界书 trace 中，部分聊天切换预热 trace 没有完整 `entries-total` 汇总，因此分项样本数不同：
+最新 token-optimized 样本包含 8 次成功世界书 trace，5,363 条场景的条目准备阶段如下：
 
 | 阶段 | 平均 | 最大 | 累计 / 样本数 |
 | --- | ---: | ---: | ---: |
-| world 数据收集 | 72.7 ms | 89.4 ms | 1.31 s / 18 |
-| `WORLDINFO_ENTRIES_LOADED` 监听器 | 71.5 ms | 110.2 ms | 1.29 s / 18 |
-| 排序 | 1.0 ms | 1.7 ms | 17.8 ms / 18 |
-| decorator 解析、对象构造和 hash | 412.2 ms | 537.0 ms | 7.42 s / 18 |
-| 最终 `structuredClone` | 51.0 ms | 63.1 ms | 918 ms / 18 |
-| 完整 entries 阶段 | 608.1 ms | 782.4 ms | 8.51 s / 14 |
+| world 数据收集 | 46.2 ms | 54.1 ms | 369.2 ms / 8 |
+| `WORLDINFO_ENTRIES_LOADED` 监听器 | 48.6 ms | 64.1 ms | 388.7 ms / 8 |
+| 排序 | 1.8 ms | 9.4 ms | 14.5 ms / 8 |
+| decorator 解析、对象构造和 hash | 200.6 ms | 225.8 ms | 1.60 s / 8 |
+| 最终 `structuredClone` | 36.6 ms | 45.4 ms | 293.0 ms / 8 |
+| 完整 entries 阶段 | 334.0 ms | 378.7 ms | 2.67 s / 8 |
 
 TauriTavern 核心的世界书排序只有约 1 ms，不是当前热点。核心成本主要来自对象准备、hash、clone 和多轮扫描。
 
-提交 `10ef622b` 已把 entries prepare 的两次连续 `map()` 合为一次遍历，减少一份 5,363 条中间数组及第二轮对象展开。新实现仍在添加 `hash` 前对 `{ ...entry, decorators, content }` 执行相同的 `JSON.stringify`；等价测试覆盖原有 hash 字段、空内容、嵌套数据和属性顺序。Schema 10 Android 实机复测中，同为 5,363 条的 `entries-prepare` 平均从 413.5 ms 降至 195.6 ms，降低 52.7%；完整世界书平均从 1.747 s 降至 1.345 s，降低 23.0%。该对照仍会受触发条目和 Token cache 热度影响，但准备阶段的降幅已经脱离噪声范围。
+提交 `10ef622b` 已把 entries prepare 的两次连续 `map()` 合为一次遍历，减少一份 5,363 条中间数组及第二轮对象展开。新实现仍在添加 `hash` 前对 `{ ...entry, decorators, content }` 执行相同的 `JSON.stringify`；等价测试覆盖原有 hash 字段、空内容、嵌套数据和属性顺序。Schema 10 Android 实机复测中，同为 5,363 条的 `entries-prepare` 平均从 413.5 ms 降至 200.6 ms，降低 51.5%；完整世界书阶段平均降至 334.0 ms。该对照仍会受事件监听器和设备状态影响，但准备阶段的降幅已经脱离噪声范围。
 
 更高收益的 prepared-entry cache 需要覆盖世界书保存、删除、导入、角色/人格/聊天绑定、设置变化和事件修改，尚不具备足够失效证据。
 
@@ -72,7 +77,7 @@ Schema 10 报告 `tauritavern-perf-2026-07-13T17-12-14.103Z.json` 共记录 217 
 
 提交 `9a99d2c8` 将性能报告升级为 Schema 10，为 `count_openai_tokens_batch` 和 `count_openai_token_prefixes` 记录 `cache/dedupe/transport` outcome、broker 限流队列等待和 transport 时长。样本不包含 model、文本、messages、DTO 或 dedupe key，采集关闭时不读取时钟。这里的 transport 仍是 Tauri IPC 与 Rust native 执行的合计，尚不能单独表示 tokenizer 内部 CPU。
 
-后续优化把 prefix 计数下沉为 `TokenizerRepository` 的窄接口。OpenAI/tiktoken 路径利用 tokenizer 的稳定正则分段边界，只保留可能受下一个后缀影响的末尾片段并重新编码；已确定稳定的共同前缀不再重复扫描。其他 tokenizer 后端继续使用原始完整消息计数。外部 URL、`model/base/suffixes/stop_at` DTO、`token_counts` 返回数组和达到 `stop_at` 后填充剩余结果的语义均未改变。
+提交 `b8ca3364` 已把 prefix 计数下沉为 `TokenizerRepository` 的窄接口。OpenAI/tiktoken 路径利用 tokenizer 的稳定正则分段边界，只保留可能受下一个后缀影响的末尾片段并重新编码；已确定稳定的共同前缀不再重复扫描。其他 tokenizer 后端继续使用原始完整消息计数。外部 URL、`model/base/suffixes/stop_at` DTO、`token_counts` 返回数组和达到 `stop_at` 后填充剩余结果的语义均未改变。
 
 等价测试覆盖 `gpt-4o`、`gpt-4`、`gpt-3.5-turbo-0301`、`o1`，以及空片段、连续空白、换行、标点、中文、emoji、组合字符和类 special-token 文本，每组 64 个累计后缀均逐项对照原完整重算。Windows Debug 合成压力基准中，6 轮交替测试由 26.21 s 降至 0.755 s，约为原耗时的 2.9%；该结果只用于验证复杂度下降，不代表 Android 实机最终倍率。
 
@@ -139,48 +144,47 @@ Schema 10 Android 实机复测进一步确认了收益：
 
 宿主已经对同时发生的 `get_sillytavern_settings` 做 in-flight dedupe。跨请求 TTL 可能让 Quick Reply、世界书和设置页读取旧 revision，因此不应只凭累计耗时增加缓存。
 
-## 4. 已验证的优化效果
+## 4. 已落地优化与验证
 
-### 4.1 optimization-9 与 optimization-10
+### 4.1 分阶段效果
 
-| 指标 | optimization-9 | optimization-10 | 结论 |
-| --- | ---: | ---: | --- |
-| dry run 实际执行区间重叠 | 存在 | 0 次 | latest-wins 生效 |
-| 5,363 条 dry run Token 平均 | 1,295.6 ms | 459.8 ms | 降低 64.5% |
-| 5,363 条 dry run 世界书平均 | 2,517.9 ms | 1,331.3 ms | 降低 47.1% |
-| 5,363 条 dry run generation 平均 | 3,069.0 ms | 1,665.3 ms | 降低 45.7% |
-| 真实生成世界书平均 | 2,463.3 ms | 1,177.5 ms | 降低 52.2% |
-| CPU 平均 / P95 | 63.1% / 88.0% | 56.0% / 78.9% | 方向性改善 |
-| 主线程 busy ratio 平均 | 10.9% | 8.6% | 方向性改善 |
-| 每秒长任务平均 | 133.3 ms | 86.5 ms | 方向性改善 |
-| RSS 平均 | 357.8 MiB | 335.1 MiB | 降低 6.3% |
+| 阶段 | 关键指标 | 结果 | 证据等级 |
+| --- | --- | --- | --- |
+| optimization-9 -> optimization-10 | 5,363 条 dry run Token 平均 1,295.6 -> 459.8 ms | -64.5% | 实机证实 |
+| optimization-9 -> optimization-10 | 5,363 条 dry run 世界书平均 2,517.9 -> 1,331.3 ms | -47.1% | 实机证实 |
+| entries prepare 单遍历 | prepare 平均 413.5 -> 200.6 ms | -51.5% | 实机证实 |
+| prefix tokenizer 增量计数 | native 平均 124.2 -> 26.1 ms；P95 540 -> 49 ms | -79.0% / -90.9% | 实机证实 |
+| 高 Token 调用任务 | Token 平均 1,567.6 -> 662.7 ms；世界书平均 2,523.8 -> 1,462.2 ms | -57.7% / -42.1% | 实机证实 |
+| Prompt Manager latest-wins | dry run 实际执行区间重叠降为 0 | 消除重叠执行 | 实机证实 |
+| 长聊天分批渲染与滚动控制 | 楼层顺序、批次边界、scroll lock 和 viewport 契约通过 | 行为保持 | 契约验证，缺专项实机压力复测 |
+| 移动端流式预览限频 | 最终完整渲染和策略测试通过 | 降低预览刷新次数 | 契约验证；尚无独立开关 A/B |
 
-两次采集的时长、操作和输出内容不同，CPU、内存与真实生成指标只能作为方向性证据。同为 5,363 条的 dry run 对照更适合表示单任务收益。
+不同报告的采集时长、操作、输出内容和 Token cache 热度并不完全一致。CPU、RSS 和真实生成总时长只作为方向性证据；同为 5,363 条的阶段耗时、tokenizer 调用分布和契约测试更适合判断单项收益。
 
-### 4.2 已落地改动
+### 4.2 运行时优化清单
 
-| 提交 | 改动 | 行为边界 |
-| --- | --- | --- |
-| `274241b5` | Prompt Manager dry run latest-wins 调度 | 实际执行仍调用完整 `Generate('normal', {}, true)` |
-| `79b9ab5d` | 完全相同的世界书前缀 Token 请求共享 in-flight Promise | settled 后删除，不复用旧结果 |
-| `227b9d92` | 原生前缀 Token 任务限制为单并发 | 不同 DTO 仍逐个执行并返回各自结果 |
-| `26e18fc0`、`c1654ea6` | 完整 DTO JSON 作为 prefix Token dedupe identity | 避免哈希碰撞错误合并请求 |
-| `12b17bb3` | 批量精确 world-info Token 计数 | 保留精确计数结果 |
-| `2683e713` | 按 Token budget 提前停止前缀计数 | 保留预算命中及 `ignoreBudget` 语义 |
-| `2363ea41` | 移动端限制流式预览刷新 | 最终消息仍完整渲染 |
-| `c9d427c6` | 长聊天楼层分批渲染 | 楼层 ID 和顺序不变 |
-| `7558fdd5`、`dae0540b` | 集中滚动控制并保留 viewport | 尊重用户 scroll lock |
-| `10ef622b` | entries prepare 合并为单次遍历 | hash 输入、属性顺序和最终对象逐项等价 |
-| `9a99d2c8` | Tokenizer broker 队列与 transport 精准埋点 | 只读观测，不修改 DTO、策略、结果或异常 |
-| `b8ca3364` | OpenAI prefix tokenizer 增量计数 | DTO、返回数组、stop_at 语义及非 OpenAI 后端路径不变 |
+| 方向 | 提交 | 已完成改动 | 行为边界 |
+| --- | --- | --- | --- |
+| 世界书 Token | `12b17bb3`、`2683e713` | 批量精确计数，并在达到 budget 后停止无效前缀计算 | 保留精确结果、budget 命中和 `ignoreBudget` 语义 |
+| Token 调度 | `79b9ab5d`、`227b9d92`、`26e18fc0`、`c1654ea6` | identical request single-flight、prefix native 单并发和精确 DTO identity | 不跨 settled 结果复用，不合并不同 DTO |
+| Token 算法 | `b8ca3364` | OpenAI/tiktoken 累计前缀增量计数 | URL、DTO、返回数组、`stop_at` 和非 OpenAI 路径不变 |
+| 世界书准备 | `10ef622b` | decorator、对象构造和 hash 合为单次遍历 | hash 输入、属性顺序和最终对象逐项等价 |
+| Prompt 预览 | `274241b5` | 重叠 dry run 改为 latest-wins | 真正执行时仍调用完整 `Generate('normal', {}, true)` |
+| 流式预览 | `2363ea41` | 移动端限制中间预览刷新频率 | 不跳过 Token 事件，最终消息完整格式化 |
+| 长聊天 | `c9d427c6` | 楼层分批渲染并让出主线程 | 楼层 ID、顺序和 windowed payload 不变 |
+| viewport | `7558fdd5`、`dae0540b` | 统一滚动所有权，发送、生成结束和 prepend 保留用户位置 | 尊重 scroll lock，不改变显式滚动命令 |
 
 动态宏、概率、timed effects、宿主事件、世界书激活顺序和最终请求体仍由每次真正执行的完整流程计算。
+
+### 4.3 性能监视器覆盖
+
+`perf` 基线及本分支后续提交已覆盖世界书、generation、流式阶段、聊天加载、慢交互、长聊天 prepend、事件监听器、Quick Reply、Slash Command、网络、Android CPU/RSS、长任务、DOM、Tokenizer broker queue/transport/cache/dedupe。`9a99d2c8` 只增加 tokenizer 精准埋点，不改变 DTO、策略、返回值或异常。
 
 ## 5. 后续优化计划
 
 ### P0：降低流式稳态 CPU
 
-1. 删除仅用于统计的逐 chunk timestamp 数组；
+1. 删除 `Generate()` 中仅用于控制台 TPS 统计的逐 chunk timestamp 数组，改为首时间、末时间和计数；
 2. 继续记录 regex、Markdown、sanitize 和 DOM commit 的输入长度与成本；
 3. 不跳过 Token 事件，不省略最终完整格式化；
 4. 以每千字符 CPU time、长任务和最终 HTML 一致性验收。
@@ -202,8 +206,8 @@ Schema 10 Android 实机复测进一步确认了收益：
 ### P2：补齐持久化和长聊天证据
 
 1. settings 请求记录调用方、请求体字节数、序列化、磁盘读取、修复和写入阶段；
-2. history prepend 记录分页 IPC、每批 render、图片/iframe hydration 和滚动锚点；
-3. 覆盖 200、500 和 1,000 楼快速连续翻页。
+2. history prepend 已覆盖分页 IPC、每批 render 和滚动锚点，下一步补图片/iframe hydration；
+3. 用现有埋点覆盖 200、500 和 1,000 楼快速连续翻页。
 
 ## 6. 暂缓的高风险方案
 
@@ -322,14 +326,16 @@ tokenizer 优化后样本 SHA-256：`D4984BA278E60212F6FC8AE7CB52FDEC06CA43FDC04
 3. 世界书 prepared-entry cache 所需的 revision 和失效来源；
 4. DOM 节点模块归属和 detached node；
 5. settings 请求调用方、字节数和磁盘阶段；
-6. history prepend 的图片/iframe hydration 和滚动锚点偏移；
+6. history prepend 的图片/iframe hydration；
 7. profiler 开启/关闭的 CPU、内存和输入延迟 A/B；
 8. 设备允许时的电池温度、电流和电压。
 
 ## 11. 最终结论
 
 - TauriTavern 的 dry run 并发和世界书 Token 风暴已经得到数量级改善；
+- 世界书 entries prepare 已完成单遍历优化，Android 实机平均下降 51.5%；
 - OpenAI prefix tokenizer 的重复扫描已通过 Schema 10 Android 实机复测，高 Token 调用任务的 Token 阶段平均下降 57.7%，旧有 0.5–0.7 s 单次尖峰未再出现；
+- 长聊天分批渲染、集中滚动所有权和 viewport 保持已经落地并通过契约测试，但仍缺少大聊天实机压力复测；
 - 当前第一持续功耗问题是流式格式化和 Token 事件；DOM/RSS 基线仍会造成发热与按钮 presentation delay；
 - settings 和持久化是次级异步成本，不能用有状态风险的 TTL 缓存草率处理；
 - 后续优化必须以最终请求体、世界书激活、消息 HTML、变量状态、事件顺序和 viewport 等价为前提。
