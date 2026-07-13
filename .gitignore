@@ -31,6 +31,8 @@ FasTools.exe
 
 # Build artifacts
 release
+artifacts/
+src-tauri/crates/tauritavern/gen/android/app/debug.keystore
 
 # Local upstream checkout (junction/symlink)
 sillytavern-*

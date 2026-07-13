@@ -21,3 +21,8 @@ dependencies {
     implementation("com.android.tools.build:gradle:8.11.0")
 }
 
+sourceSets {
+    main {
+        kotlin.setSrcDirs(listOf("src/main/java/com/tauritavern/client/kotlin"))
+    }
+}
