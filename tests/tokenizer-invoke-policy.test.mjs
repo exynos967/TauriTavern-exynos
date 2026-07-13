@@ -64,3 +64,12 @@ test('token prefix policy does not cache settled results', async () => {
     assert.deepEqual(await broker.invoke('count_openai_token_prefixes', args), { token_counts: [1] });
     assert.deepEqual(await broker.invoke('count_openai_token_prefixes', args), { token_counts: [2] });
 });
+
+test('token prefix policy uses the complete DTO as its dedupe identity', () => {
+    const policy = createHostInvokePolicies().count_openai_token_prefixes;
+    const first = { dto: { model: 'gpt-4o', base: 'a', suffixes: ['b'], stop_at: 10 } };
+    const second = { dto: { model: 'gpt-4o', base: 'a', suffixes: ['c'], stop_at: 10 } };
+
+    assert.equal(policy.key(first), JSON.stringify(first.dto));
+    assert.notEqual(policy.key(first), policy.key(second));
+});

@@ -38,10 +38,15 @@ const PROVIDER_METADATA_TIMEOUT_MS = 35_000;
  * @param {any} args
  * @returns {string}
  */
-function tokenizerRequestKey(args) {
+function countOpenAiTokensBatchKey(args) {
     const dto = args?.dto ?? args ?? {};
     const json = JSON.stringify(dto);
     return fnv1a32(json);
+}
+
+function exactTokenizerRequestKey(args) {
+    const dto = args?.dto ?? args ?? {};
+    return JSON.stringify(dto);
 }
 
 /**
@@ -87,12 +92,12 @@ export function createHostInvokePolicies() {
             maxConcurrent: 1,
             cacheTtlMs: 2_000,
             cacheLimit: 50,
-            key: tokenizerRequestKey,
+            key: countOpenAiTokensBatchKey,
         },
         count_openai_token_prefixes: {
             kind: 'dedupe',
             maxConcurrent: 1,
-            key: tokenizerRequestKey,
+            key: exactTokenizerRequestKey,
         },
         get_openrouter_model_providers: {
             kind: 'dedupe',
