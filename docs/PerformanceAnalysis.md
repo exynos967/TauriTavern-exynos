@@ -556,15 +556,27 @@ Android 上 `/proc/stat` 和 `/sys/class/power_supply/...` 可能受权限或设
 
 | 方向 | 当前实现 | 证据/状态 |
 | --- | --- | --- |
-| 性能可观测性 | Perf 扩展、世界书/流式/generation/chat trace、监听器和运行时诊断 | Schema 已演进至 4；仍缺稳定监听器身份和完整原生能耗 |
+| 性能可观测性 | Perf 扩展、世界书/流式/generation/chat trace、监听器归属、自动化和运行时诊断 | Schema 已演进至 9；设备未提供电池温度/电流，仍缺模块级 DOM 归属 |
+| Prompt Manager dry run | 运行中只保留一次最新重跑，合并重叠预览 | 不缓存 prompt、不取消已开始任务；N 个并发预览收敛为当前 1 个 + 最新 1 个 |
 | 世界书排序 | 避免重复排序索引查找 | 当前排序单次约 0.8–1.3 ms，已不是瓶颈 |
-| 世界书 token | OpenAI 批量精确计数、累计前缀批处理、预算命中短路 | 最坏现场值从 217 s 降到 4.22 s；需同负载复测 |
+| 世界书 token | OpenAI 批量精确计数、累计前缀批处理、预算命中短路、相同请求 single-flight、原生前缀任务串行 | 不增加缓存 TTL；不同 DTO 保持独立结果，避免 CPU 密集任务并发竞争 |
 | 流式预览 | 移动端和后台状态限制预览刷新率 | 格式化次数低于 chunk 数，但长输出仍可累计 4.77 s |
 | 长聊天楼层 | 分批 prepend，每批间让出一帧 | 小样本操作最大 54.6 ms；缺少大聊天快速翻页复测 |
 | 滚动行为 | 集中滚动控制、保留 viewport、尊重用户 scroll lock | 已修复发送/结束输出抢占滚动的实现根因，需持续回归 |
 | 聊天存储 | windowed payload、历史按需 backfill、页缓存和批量 IPC | 可见消息渲染已不是聊天打开瓶颈 |
 | 冷启动内存 | token cache 按 chat 分桶；Prompt Inspector index/record 懒加载 | 降低 whole-load；扩展/UI DOM 基线仍高 |
 | 设置与资源 | 设置聚合缓存、增量 patch、Host Resource 条件缓存 | 降低重复磁盘读取；前端仍存在重复 settings/version 请求 |
+
+### 7.1 Schema 9 后新增优化
+
+| 提交 | 改动 | 不变契约 | 验证 |
+| --- | --- | --- | --- |
+| `274241b5` | Prompt Manager dry run 使用 latest-wins 调度 | 每个实际执行的 dry run 仍调用原 `Generate('normal', {}, true)`；最终一次状态必定重跑；`render(false)` 不经过该队列 | 调度器并发、重跑和异常恢复单测；完整 contracts、types、frontend、Rspack build |
+| `79b9ab5d` | 完全相同的世界书前缀 Token 请求共享 in-flight Promise | HTTP URL、body、响应、fallback 和 token cache 写入不变；settled 后立即删除，不复用旧结果 | exact key、成功/失败清理、fallback 和 route 契约测试 |
+| `227b9d92` | 宿主 invoke 层把原生前缀 Token 任务限制为单并发 | 不同 DTO 仍逐个调用 native 并返回各自结果；没有 TTL cache、DTO 或错误类型变化 | transport 调用次数、最大并发和无 settled cache 测试 |
+| `26e18fc0`、`c1654ea6` | 前缀 Token invoke 使用完整 DTO JSON 作为 dedupe identity | 避免 32 位哈希碰撞把不同请求合并；批量 Token 原策略不变 | 完整 DTO identity 和 TypeScript 门禁 |
+
+这些改动针对 Schema 9 已证实的“预览并发风暴”，而不是复用旧 prompt。动态宏、概率、timed effects、扩展事件、世界书激活顺序和最终请求体仍由每次真正执行的完整 dry run 计算。
 
 ## 8. 根因分层
 
@@ -659,6 +671,17 @@ Android 上 `/proc/stat` 和 `/sys/class/power_supply/...` 可能受权限或设
 
 这些改动跨越插件兼容、DOM 生命周期和请求构造边界，收益可能高，但回归风险也最高。
 
+### 本轮明确暂缓的破坏性方案
+
+以下方案没有实施，并非遗漏，而是当前证据无法证明行为等价：
+
+1. **取消已经进入 Rust `spawn_blocking` 的 Token 请求。** 需要新增 request ID/cancellation DTO 和新的取消错误语义；单次 tokenizer 调用本身也没有协作检查点。当前先在调度层消除并发与重复请求。
+2. **全局并行 EventEmitter 或跳过慢监听器。** 会改变扩展注册顺序、变量可见性、Quick Reply/Slash Command 结果和最终请求体。`ST-Prompt-Template`、`JS-Slash-Runner` 的长 await 属于用户自动化的真实行为，只能由扩展自身或逐项等价重构处理。
+3. **给 `/api/settings/get` 增加跨请求 TTL。** 宿主已经对同一时刻的 `get_sillytavern_settings` 做 in-flight dedupe；报告中的 20 次调用跨越 16 分钟。额外 TTL 可能让 Quick Reply、世界书和主设置页读取旧 revision。
+4. **合并 `/api/settings/patch`。** 当前保存已有前端串行队列、CAS revision 和宿主 write-behind；进一步合并可能改变冲突、失败重试和保存顺序。
+5. **继续降低流式事件或刷新频率。** `Stopwatch.tick()` 已合并中间预览，最终路径仍完整渲染。跳过 `STREAM_TOKEN_RECEIVED` 会破坏扩展契约，强制降低用户配置 FPS 会改变预期显示行为。
+6. **卸载隐藏设置页或扩展 DOM。** 第三方扩展可能同步查询这些节点、保存表单状态或绑定 MutationObserver；在缺少模块级 DOM 所有权数据前不做破坏性卸载。
+
 ## 10. 不可破坏的行为契约
 
 所有优化必须满足：
@@ -740,19 +763,15 @@ Android 上 `/proc/stat` 和 `/sys/class/power_supply/...` 可能受权限或设
 
 ## 13. 埋点缺口
 
-当前 Schema 4 已能回答“哪个阶段卡”，但还不能完整回答“哪个模块为什么卡”。下一版应补充：
+Schema 9 已补齐监听器稳定身份、插件来源、Slash Command、Quick Reply、流式分阶段、history prepend、runId 强关联和 Android CPU fallback。剩余缺口为：
 
-1. 监听器稳定 ID、注册模块和插件 ID；
-2. slash command / Quick Reply 单条命令 trace；
-3. `showMoreMessages` 与分页/锚点 trace；
-4. 格式化规则集、输入长度和调用方；
-5. DOM 节点按模块统计与 detached node 计数；
-6. embedded route 到 Rust command 的关联 ID；
-7. Android CPU%、温度、电流 capability 与增量；
-8. target 被移除前的交互路径快照；
-9. Top-N 丢弃计数，区分“保存 100 条”和“总共 100 条”；
-10. 用 trace `runId` 与 generation/chat-load record 做强关联，迟到的异步 measure 不得写入其他 run；
-11. profiler 自身 CPU/内存开销的 A/B 基线。
+1. Prompt Manager dry run 的触发来源、合并次数、排队时间与实际执行次数；
+2. Tokenizer invoke 队列深度、排队时间、native 执行时间和 exact dedupe 命中；
+3. DOM 节点按核心模块/扩展归属，以及 detached node 计数；
+4. settings 请求体字节数、序列化、磁盘读取、修复和写入阶段；
+5. history prepend 的图片/iframe hydration 与滚动锚点偏移；
+6. 设备允许时的电池温度、电流和电压；当前设备明确没有暴露这些值；
+7. profiler 关闭/开启的 CPU、内存和输入延迟 A/B 基线。
 
 性能 JSON 会包含控件名称、扩展脚本可访问文本和用户文件路径。原始报告应留在本地，不直接提交仓库；共享前应脱敏，仅保留聚合指标和稳定匿名 ID。
 
