@@ -28,6 +28,9 @@ const state = {
     slowInteractions: [],
     operations: [],
     slowListeners: [],
+    slowListenerObserved: 0,
+    slowListenerDropped: 0,
+    listenerAggregates: new Map(),
     rafId: null,
     lastFrameAt: null,
     panel: null,
@@ -330,21 +333,72 @@ function installMeasureObserver() {
 }
 
 function installEventListenerProfiler() {
-    globalThis.__TAURITAVERN_PERF_EVENT_LISTENER__ = ({ event, listener, index, durationMs }) => {
+    globalThis.__TAURITAVERN_PERF_EVENT_LISTENER__ = ({
+        event,
+        listener,
+        registration,
+        index,
+        durationMs,
+        synchronousDurationMs,
+        waitDurationMs,
+    }) => {
         if (!state.capturing || durationMs < SLOW_LISTENER_THRESHOLD_MS) {
             return;
         }
 
+        state.slowListenerObserved += 1;
+        const identity = registration?.stableKey
+            ?? registration?.id
+            ?? `${String(event)}:${registration?.source?.modulePath ?? listener?.name ?? '(anonymous)'}:${Number(index)}`;
+        const aggregate = state.listenerAggregates.get(identity) ?? {
+            identity,
+            event: String(event),
+            registration: registration ? structuredClone(registration) : null,
+            count: 0,
+            totalDurationMs: 0,
+            totalSynchronousMs: 0,
+            totalWaitMs: 0,
+            maxDurationMs: 0,
+        };
+        aggregate.count += 1;
+        aggregate.totalDurationMs += Number(durationMs) || 0;
+        aggregate.totalSynchronousMs += Number(synchronousDurationMs) || 0;
+        aggregate.totalWaitMs += Number(waitDurationMs) || 0;
+        aggregate.maxDurationMs = Math.max(aggregate.maxDurationMs, Number(durationMs) || 0);
+        state.listenerAggregates.set(identity, aggregate);
+
         state.slowListeners.push({
             event: String(event),
-            listener: listener?.name || '(anonymous)',
+            listener: registration?.listenerName || listener?.name || '(anonymous)',
+            identity,
+            registration: registration ? structuredClone(registration) : null,
             index: Number(index),
             durationMs: finiteRound(durationMs),
+            synchronousDurationMs: finiteRound(synchronousDurationMs),
+            waitDurationMs: finiteRound(waitDurationMs),
             observedAt: finiteRound(now()),
         });
         if (state.slowListeners.length > MAX_SLOW_LISTENERS) {
-            state.slowListeners.splice(0, state.slowListeners.length - MAX_SLOW_LISTENERS);
+            const dropped = state.slowListeners.length - MAX_SLOW_LISTENERS;
+            state.slowListeners.splice(0, dropped);
+            state.slowListenerDropped += dropped;
         }
+    };
+}
+
+function getListenerProfilerSnapshot() {
+    return {
+        thresholdMs: SLOW_LISTENER_THRESHOLD_MS,
+        observed: state.slowListenerObserved,
+        stored: state.slowListeners.length,
+        dropped: state.slowListenerDropped,
+        aggregates: Array.from(state.listenerAggregates.values(), aggregate => ({
+            ...structuredClone(aggregate),
+            totalDurationMs: finiteRound(aggregate.totalDurationMs),
+            totalSynchronousMs: finiteRound(aggregate.totalSynchronousMs),
+            totalWaitMs: finiteRound(aggregate.totalWaitMs),
+            maxDurationMs: finiteRound(aggregate.maxDurationMs),
+        })),
     };
 }
 
@@ -403,7 +457,7 @@ function stopCapture() {
 
 function snapshot() {
     return {
-        schemaVersion: 4,
+        schemaVersion: 5,
         exportedAt: new Date().toISOString(),
         userAgent: navigator.userAgent,
         viewport: {
@@ -417,6 +471,7 @@ function snapshot() {
         slowInteractions: structuredClone(state.slowInteractions),
         operations: structuredClone(state.operations),
         slowListeners: structuredClone(state.slowListeners),
+        listenerProfiler: getListenerProfilerSnapshot(),
         diagnostics: runtimeDiagnostics.snapshot(),
     };
 }
@@ -526,6 +581,9 @@ function createUi() {
         state.slowInteractions = [];
         state.operations = [];
         state.slowListeners = [];
+        state.slowListenerObserved = 0;
+        state.slowListenerDropped = 0;
+        state.listenerAggregates.clear();
         runtimeDiagnostics.clear();
         renderStatus();
     });

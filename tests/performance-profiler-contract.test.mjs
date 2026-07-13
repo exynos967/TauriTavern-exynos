@@ -9,11 +9,15 @@ const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..
 test('performance report exports generic operations and slow event listeners', async () => {
     const source = await readFile(path.join(REPO_ROOT, 'src/scripts/extensions/tauritavern-perf-profiler/index.js'), 'utf8');
 
-    assert.match(source, /schemaVersion:\s*4/);
+    assert.match(source, /schemaVersion:\s*5/);
     assert.match(source, /operations:\s*structuredClone\(state\.operations\)/);
     assert.match(source, /slowListeners:\s*structuredClone\(state\.slowListeners\)/);
     assert.match(source, /diagnostics:\s*runtimeDiagnostics\.snapshot\(\)/);
     assert.match(source, /__TAURITAVERN_PERF_EVENT_LISTENER__/);
+    assert.match(source, /listenerProfiler:\s*getListenerProfilerSnapshot\(\)/);
+    assert.match(source, /synchronousDurationMs/);
+    assert.match(source, /waitDurationMs/);
+    assert.match(source, /slowListenerDropped/);
 });
 
 test('performance profiler captures interaction latency and heat signals only while enabled', async () => {

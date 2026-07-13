@@ -1,5 +1,85 @@
 /* Polyfill indexOf. */
 var indexOf;
+var nextListenerRegistrationId = 1;
+var listenerRegistrations = new WeakMap();
+
+function sanitizeRegistrationSource(stack) {
+    if (typeof stack !== 'string') {
+        return null;
+    }
+
+    const lines = stack.split('\n');
+    for (const line of lines) {
+        if (line.includes('/lib/eventemitter.js') || line.includes('\\lib\\eventemitter.js')) {
+            continue;
+        }
+
+        const match = line.match(/((?:https?|tauri|file):\/\/[^\s)]+?):(\d+):(\d+)/);
+        if (!match) {
+            continue;
+        }
+
+        try {
+            const url = new URL(match[1]);
+            const pathname = decodeURIComponent(url.pathname).replaceAll('\\', '/');
+            const sourceMarker = pathname.lastIndexOf('/src/');
+            const testMarker = pathname.lastIndexOf('/tests/');
+            const modulePath = sourceMarker >= 0
+                ? pathname.slice(sourceMarker + 5)
+                : testMarker >= 0
+                    ? pathname.slice(testMarker + 1)
+                    : pathname.replace(/^\/+/, '');
+            const extensionMatch = modulePath.match(/^scripts\/extensions\/(third-party\/[^/]+|[^/]+)/);
+            return {
+                modulePath,
+                extensionId: extensionMatch?.[1] ?? null,
+                line: Number(match[2]),
+                column: Number(match[3]),
+            };
+        } catch {
+            return null;
+        }
+    }
+
+    return null;
+}
+
+function registerListener(event, listener, method, originalListener = listener) {
+    if (typeof listener !== 'function') {
+        return;
+    }
+
+    const registrationId = nextListenerRegistrationId++;
+    const source = sanitizeRegistrationSource(new Error().stack);
+    const listenerName = originalListener?.name || listener.name || '(anonymous)';
+    const stableKey = source
+        ? [event, method, source.modulePath, source.line, source.column, listenerName].join('|')
+        : null;
+    let eventRegistrations = listenerRegistrations.get(listener);
+    if (!eventRegistrations) {
+        eventRegistrations = new Map();
+        listenerRegistrations.set(listener, eventRegistrations);
+    }
+    eventRegistrations.set(event, {
+        id: `listener-${registrationId}`,
+        stableKey,
+        method,
+        sequence: registrationId,
+        listenerName,
+        source,
+    });
+}
+
+function getListenerRegistration(event, listener) {
+    return listenerRegistrations.get(listener)?.get(event) ?? {
+        id: null,
+        stableKey: null,
+        method: 'preexisting',
+        sequence: null,
+        listenerName: listener?.name || '(anonymous)',
+        source: null,
+    };
+}
 
 if (typeof Array.prototype.indexOf === 'function') {
     indexOf = function (haystack, needle) {
@@ -52,6 +132,7 @@ EventEmitter.prototype.on = function (event, listener) {
     }
 
     this.events[event].push(listener);
+    registerListener(event, listener, 'on');
 
     if (this.autoFireAfterEmit.has(event) && this.autoFireLastArgs.has(event)) {
         listener.apply(this, this.autoFireLastArgs.get(event));
@@ -76,6 +157,7 @@ EventEmitter.prototype.makeLast = function (event, listener) {
     }
 
     events.push(listener);
+    registerListener(event, listener, 'makeLast');
 
     if (this.autoFireAfterEmit.has(event) && this.autoFireLastArgs.has(event)) {
         listener.apply(this, this.autoFireLastArgs.get(event));
@@ -100,6 +182,7 @@ EventEmitter.prototype.makeFirst = function (event, listener) {
     }
 
     events.unshift(listener);
+    registerListener(event, listener, 'makeFirst');
 
     if (this.autoFireAfterEmit.has(event) && this.autoFireLastArgs.has(event)) {
         listener.apply(this, this.autoFireLastArgs.get(event));
@@ -145,15 +228,28 @@ EventEmitter.prototype.emit = async function (event) {
             const listener = listeners[i];
             const profiler = globalThis.__TAURITAVERN_PERF_EVENT_LISTENER__;
             const startedAt = profiler ? performance.now() : 0;
+            let synchronousDurationMs = null;
             try {
-                await listener.apply(this, args);
+                const result = listener.apply(this, args);
+                synchronousDurationMs = profiler ? performance.now() - startedAt : null;
+                await result;
             }
             catch (err) {
+                synchronousDurationMs ??= profiler ? performance.now() - startedAt : null;
                 console.error(err);
                 console.trace('Error in event listener');
             }
             finally {
-                profiler?.({ event, listener, index: i, durationMs: performance.now() - startedAt });
+                const durationMs = profiler ? performance.now() - startedAt : 0;
+                profiler?.({
+                    event,
+                    listener,
+                    registration: getListenerRegistration(event, listener),
+                    index: i,
+                    durationMs,
+                    synchronousDurationMs,
+                    waitDurationMs: Math.max(0, durationMs - (synchronousDurationMs ?? durationMs)),
+                });
             }
         }
     }
@@ -194,10 +290,20 @@ EventEmitter.prototype.emitAndWait = function (event) {
 };
 
 EventEmitter.prototype.once = function (event, listener) {
-    this.on(event, function g() {
+    const wrapper = function g() {
         this.removeListener(event, g);
         listener.apply(this, arguments);
-    });
+    };
+
+    if (typeof this.events[event] !== 'object') {
+        this.events[event] = [];
+    }
+    this.events[event].push(wrapper);
+    registerListener(event, wrapper, 'once', listener);
+
+    if (this.autoFireAfterEmit.has(event) && this.autoFireLastArgs.has(event)) {
+        wrapper.apply(this, this.autoFireLastArgs.get(event));
+    }
 };
 
 export { EventEmitter }
