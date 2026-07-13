@@ -11,7 +11,7 @@ Local-only performance diagnostics for generation, chat loading, slow interactio
 
 The profiler records generation timing, observable world-info scan metrics, streamed chunk timing, frame delays, long tasks, and JS heap data when the WebView exposes it. It does not send data over the network.
 
-Schema 9 reports additionally include:
+Schema 10 reports additionally include:
 
 - Stable slow-listener attribution: registration mode/order, source module, extension ID, synchronous time, awaited time, aggregate totals, and dropped-record counts. Release-minified function names are not used as the primary identity.
 - Strong generation trace correlation: generation, world-info, and stream traces use explicit run IDs. Late or standalone traces are exported as `unattributedTraces` instead of being attached by overlapping timestamps.
@@ -19,13 +19,14 @@ Schema 9 reports additionally include:
 - Per-render streaming formatting: input/processed/formatted character counts, final-frame status, and regex/Markdown/sanitize/DOM timing deltas.
 - Per-batch history prepend timing: message range/count, render/DOM/scroll-anchor cost, height change, and frame-yield status.
 - Runtime interaction, network, event-loop, DOM, resident-memory, and process CPU samples. Android process CPU falls back to process ticks plus wall time when access to global `/proc/stat` is restricted.
+- Tokenizer invoke outcomes, concurrency-queue wait, and native transport duration without request DTOs, model names, text, messages, or dedupe keys.
 
 ## Privacy and overhead
 
 - Reports do not include chat text, generated text, input values, Quick Reply labels/scripts, slash-command arguments, command results, or settings payloads.
 - Quick Reply set/source identities are deterministic non-plaintext hashes for local correlation, not cryptographic anonymization. Request records contain method, origin category, and path without query strings or bodies.
 - Source attribution strips desktop workspace prefixes and keeps repository-relative module paths where possible. Registration stacks are captured only for generation, message, chat, world-info, streaming, settings, and extension-startup events; other events retain low-cost registration metadata.
-- Expensive runtime hooks, per-render phase snapshots, automation timing, and history batch timing are inactive while capture is stopped. Event registration metadata is recorded once when a listener is registered so Release builds can be attributed later.
+- Expensive runtime hooks, per-render phase snapshots, automation timing, history batch timing, and Tokenizer invoke timing are inactive while capture is stopped. Event registration metadata is recorded once when a listener is registered so Release builds can be attributed later.
 - Listener, automation, formatting, history, network, invoke, interaction, and health collections are bounded. Reports include observed/stored/dropped counts where truncation is relevant.
 
 When TauriTavern's optional core tracing is available, reports also include:

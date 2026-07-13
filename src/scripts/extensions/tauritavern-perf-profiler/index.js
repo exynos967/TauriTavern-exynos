@@ -13,8 +13,10 @@ const MAX_UNATTRIBUTED_TRACES = 50;
 const MAX_AUTOMATION_SAMPLES = 300;
 const MAX_STREAM_FORMAT_SAMPLES = 300;
 const MAX_HISTORY_PREPEND_SAMPLES = 200;
+const MAX_TOKEN_INVOKE_SAMPLES = 300;
 const MAX_SLOW_LISTENERS = 100;
 const SLOW_LISTENER_THRESHOLD_MS = 8;
+const TOKEN_INVOKE_COMMANDS = new Set(['count_openai_tokens_batch', 'count_openai_token_prefixes']);
 
 const runtimeDiagnostics = createRuntimeDiagnostics({
     nativeSampler: isTauri() ? () => invoke('get_perf_runtime_sample') : undefined,
@@ -41,6 +43,9 @@ const state = {
     historyPrependSamples: [],
     historyPrependObserved: 0,
     historyPrependDropped: 0,
+    tokenInvokeSamples: [],
+    tokenInvokeObserved: 0,
+    tokenInvokeDropped: 0,
     slowListeners: [],
     slowListenerObserved: 0,
     slowListenerDropped: 0,
@@ -530,6 +535,39 @@ function getHistoryPrependProfilerSnapshot() {
     };
 }
 
+function installTokenInvokeProfiler() {
+    globalThis.__TAURITAVERN_PERF_INVOKE_BROKER__ = sample => {
+        if (!state.capturing || !sample || !TOKEN_INVOKE_COMMANDS.has(sample.command)) {
+            return;
+        }
+
+        state.tokenInvokeObserved += 1;
+        state.tokenInvokeSamples.push({
+            command: sample.command,
+            outcome: sample.outcome,
+            durationMs: finiteRound(sample.durationMs),
+            queueWaitMs: finiteRound(sample.queueWaitMs),
+            transportDurationMs: finiteRound(sample.transportDurationMs),
+            ok: Boolean(sample.ok),
+            observedAt: finiteRound(now()),
+        });
+        if (state.tokenInvokeSamples.length > MAX_TOKEN_INVOKE_SAMPLES) {
+            const dropped = state.tokenInvokeSamples.length - MAX_TOKEN_INVOKE_SAMPLES;
+            state.tokenInvokeSamples.splice(0, dropped);
+            state.tokenInvokeDropped += dropped;
+        }
+    };
+}
+
+function getTokenInvokeProfilerSnapshot() {
+    return {
+        observed: state.tokenInvokeObserved,
+        stored: state.tokenInvokeSamples.length,
+        dropped: state.tokenInvokeDropped,
+        samples: structuredClone(state.tokenInvokeSamples),
+    };
+}
+
 function getListenerProfilerSnapshot() {
     return {
         thresholdMs: SLOW_LISTENER_THRESHOLD_MS,
@@ -586,6 +624,7 @@ function startCapture() {
     installAutomationProfiler();
     installStreamFormatProfiler();
     installHistoryPrependProfiler();
+    installTokenInvokeProfiler();
     startFrameSampler();
     runtimeDiagnostics.start();
     renderStatus();
@@ -603,13 +642,14 @@ function stopCapture() {
     delete globalThis.__TAURITAVERN_PERF_AUTOMATION__;
     delete globalThis.__TAURITAVERN_PERF_STREAM_FORMAT__;
     delete globalThis.__TAURITAVERN_PERF_HISTORY_PREPEND__;
+    delete globalThis.__TAURITAVERN_PERF_INVOKE_BROKER__;
     runtimeDiagnostics.stop();
     renderStatus();
 }
 
 function snapshot() {
     return {
-        schemaVersion: 9,
+        schemaVersion: 10,
         exportedAt: new Date().toISOString(),
         userAgent: navigator.userAgent,
         viewport: {
@@ -628,6 +668,7 @@ function snapshot() {
         automationProfiler: getAutomationProfilerSnapshot(),
         streamFormatProfiler: getStreamFormatProfilerSnapshot(),
         historyPrependProfiler: getHistoryPrependProfilerSnapshot(),
+        tokenInvokeProfiler: getTokenInvokeProfilerSnapshot(),
         diagnostics: runtimeDiagnostics.snapshot(),
     };
 }
@@ -750,6 +791,9 @@ function createUi() {
         state.historyPrependSamples = [];
         state.historyPrependObserved = 0;
         state.historyPrependDropped = 0;
+        state.tokenInvokeSamples = [];
+        state.tokenInvokeObserved = 0;
+        state.tokenInvokeDropped = 0;
         runtimeDiagnostics.clear();
         renderStatus();
     });

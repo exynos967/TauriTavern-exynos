@@ -65,6 +65,87 @@ test('token prefix policy does not cache settled results', async () => {
     assert.deepEqual(await broker.invoke('count_openai_token_prefixes', args), { token_counts: [2] });
 });
 
+test('token prefix policy observes queue and transport time without changing results', async () => {
+    const gates = [deferred(), deferred()];
+    const samples = [];
+    let clock = 0;
+    let calls = 0;
+    const broker = createInvokeBroker({
+        policies: createHostInvokePolicies(),
+        now: () => clock,
+        getObserver: () => sample => samples.push(sample),
+        transport: async (_command, args) => {
+            const index = calls++;
+            assert.deepEqual(args, index === 0
+                ? { dto: { model: 'gpt-4o', base: 'a', suffixes: ['b'], stop_at: 10 } }
+                : { dto: { model: 'gpt-4o', base: 'x', suffixes: ['y'], stop_at: 20 } });
+            await gates[index].promise;
+            return { token_counts: [index + 1] };
+        },
+    });
+
+    const first = broker.invoke('count_openai_token_prefixes', { dto: { model: 'gpt-4o', base: 'a', suffixes: ['b'], stop_at: 10 } });
+    await Promise.resolve();
+    clock = 10;
+    const second = broker.invoke('count_openai_token_prefixes', { dto: { model: 'gpt-4o', base: 'x', suffixes: ['y'], stop_at: 20 } });
+    await Promise.resolve();
+
+    clock = 30;
+    gates[0].resolve();
+    assert.deepEqual(await first, { token_counts: [1] });
+    await Promise.resolve();
+    clock = 50;
+    gates[1].resolve();
+    assert.deepEqual(await second, { token_counts: [2] });
+
+    assert.equal(samples.length, 2);
+    assert.deepEqual(samples.map(sample => ({
+        command: sample.command,
+        outcome: sample.outcome,
+        ok: sample.ok,
+    })), [
+        { command: 'count_openai_token_prefixes', outcome: 'transport', ok: true },
+        { command: 'count_openai_token_prefixes', outcome: 'transport', ok: true },
+    ]);
+    assert.equal(samples[0].queueWaitMs, 0);
+    assert.ok(samples[1].queueWaitMs > 0);
+    assert.ok(samples[0].transportDurationMs >= 0);
+    assert.ok(samples[1].transportDurationMs >= 0);
+    for (const sample of samples) {
+        assert.deepEqual(Object.keys(sample).sort(), [
+            'command',
+            'durationMs',
+            'ok',
+            'outcome',
+            'queueWaitMs',
+            'transportDurationMs',
+        ]);
+    }
+});
+
+test('invoke observer failures and disabled observation do not affect transport', async () => {
+    let nowCalls = 0;
+    const disabled = createInvokeBroker({
+        now: () => {
+            nowCalls += 1;
+            return nowCalls;
+        },
+        getObserver: () => null,
+        transport: async (_command, args) => args,
+    });
+
+    assert.deepEqual(await disabled.invoke('plain', { value: 1 }), { value: 1 });
+    assert.equal(nowCalls, 0);
+
+    const isolated = createInvokeBroker({
+        getObserver: () => {
+            throw new Error('observer unavailable');
+        },
+        transport: async () => 42,
+    });
+    assert.equal(await isolated.invoke('plain'), 42);
+});
+
 test('token prefix policy uses the complete DTO as its dedupe identity', () => {
     const policy = createHostInvokePolicies().count_openai_token_prefixes;
     const first = { dto: { model: 'gpt-4o', base: 'a', suffixes: ['b'], stop_at: 10 } };

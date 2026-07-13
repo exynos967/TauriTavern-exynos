@@ -9,7 +9,7 @@ const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..
 test('performance report exports generic operations and slow event listeners', async () => {
     const source = await readFile(path.join(REPO_ROOT, 'src/scripts/extensions/tauritavern-perf-profiler/index.js'), 'utf8');
 
-    assert.match(source, /schemaVersion:\s*9/);
+    assert.match(source, /schemaVersion:\s*10/);
     assert.match(source, /operations:\s*structuredClone\(state\.operations\)/);
     assert.match(source, /slowListeners:\s*structuredClone\(state\.slowListeners\)/);
     assert.match(source, /diagnostics:\s*runtimeDiagnostics\.snapshot\(\)/);
@@ -27,6 +27,9 @@ test('performance report exports generic operations and slow event listeners', a
     assert.match(source, /__TAURITAVERN_PERF_STREAM_FORMAT__/);
     assert.match(source, /historyPrependProfiler:\s*getHistoryPrependProfilerSnapshot\(\)/);
     assert.match(source, /__TAURITAVERN_PERF_HISTORY_PREPEND__/);
+    assert.match(source, /tokenInvokeProfiler:\s*getTokenInvokeProfilerSnapshot\(\)/);
+    assert.match(source, /__TAURITAVERN_PERF_INVOKE_BROKER__/);
+    assert.doesNotMatch(source, /tokenInvokeSamples\.push\(\{[\s\S]*?messages:/);
 });
 
 test('automation diagnostics omit script text and command arguments', async () => {
