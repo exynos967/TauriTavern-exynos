@@ -4273,8 +4273,9 @@ class StreamingProcessor {
      * @param {Date} timeStarted Date when generation was started
      * @param {string} continueMessage Previous message if the type is 'continue'
      * @param {PromptReasoning} promptReasoning Prompt reasoning instance
+     * @param {string|null} perfParentRunId Parent generation trace ID for diagnostics only
      */
-    constructor(type, forceName2, timeStarted, continueMessage, promptReasoning) {
+    constructor(type, forceName2, timeStarted, continueMessage, promptReasoning, perfParentRunId = null) {
         this.result = '';
         this.messageId = -1;
         /** @type {HTMLElement} */
@@ -4313,7 +4314,7 @@ class StreamingProcessor {
         this.reasoningSignature = null;
         /** @type {any?} */
         this.native = null;
-        this.perfTrace = createPerformanceTrace('tt:stream', { type });
+        this.perfTrace = createPerformanceTrace('tt:stream', { type, parentRunId: perfParentRunId });
         this.perfTraceFinished = false;
     }
 
@@ -5542,7 +5543,7 @@ async function GenerateInternalCore(type, { automatic_trigger, force_name2, quie
         trigger: GENERATION_TYPE_TRIGGERS.includes(type) ? type : 'normal',
     };
     perfTrace.end('pre-world-preparation', promptSubphaseStartedAt);
-    const { worldInfoString, worldInfoBefore, worldInfoAfter, worldInfoExamples, worldInfoDepth, outletEntries, worldInfoActivation } = await perfTrace.measureAsync('world-info', () => getWorldInfoPrompt(chatForWI, this_max_context, dryRun, globalScanData));
+    const { worldInfoString, worldInfoBefore, worldInfoAfter, worldInfoExamples, worldInfoDepth, outletEntries, worldInfoActivation } = await perfTrace.measureAsync('world-info', () => getWorldInfoPrompt(chatForWI, this_max_context, dryRun, globalScanData, perfTrace.runId));
     promptSubphaseStartedAt = perfTrace.start();
     setExtensionPrompt(inject_ids.QUIET_PROMPT, '', extension_prompt_types.IN_PROMPT, 0, true);
     const includeActivatedWorldInfo = !agentMode || resolvedAgentContextPolicy.includeActivatedWorldInfo;
@@ -6334,7 +6335,7 @@ async function GenerateInternalCore(type, { automatic_trigger, force_name2, quie
 
         if (isStreamingEnabled() && type !== 'quiet') {
             continue_mag = promptReasoning.removePrefix(continue_mag);
-            streamingProcessor = new StreamingProcessor(type, force_name2, generation_started, continue_mag, promptReasoning);
+            streamingProcessor = new StreamingProcessor(type, force_name2, generation_started, continue_mag, promptReasoning, perfTrace.runId);
             if (isContinue) {
                 // Save reply does add cycle text to the prompt, so it's not needed here
                 streamingProcessor.firstMessageText = '';

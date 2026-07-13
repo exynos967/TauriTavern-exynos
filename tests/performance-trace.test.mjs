@@ -5,10 +5,16 @@ import { createPerformanceTrace } from '../src/scripts/tauri/perf/performance-tr
 
 test('performance trace aggregates repeated phases into the total measure', async () => {
     globalThis.__TAURITAVERN_PERF_PROFILER__ = { capturing: true };
+    const started = [];
+    globalThis.__TAURITAVERN_PERF_TRACE_STARTED__ = detail => started.push(detail);
     performance.clearMeasures();
 
     try {
         const trace = createPerformanceTrace('tt:test-trace', { source: 'test' });
+        assert.equal(typeof trace.runId, 'string');
+        assert.equal(started.length, 1);
+        assert.equal(started[0].runId, trace.runId);
+        assert.equal(started[0].detail.source, 'test');
         assert.equal(trace.measure('work', () => 42), 42);
         await trace.measureAsync('work', async () => Promise.resolve());
         trace.finish({ success: true });
@@ -27,6 +33,22 @@ test('performance trace aggregates repeated phases into the total measure', asyn
         assert.equal(typeof total.detail.runtime.finished.usedHeapBytes, 'object');
     } finally {
         delete globalThis.__TAURITAVERN_PERF_PROFILER__;
+        delete globalThis.__TAURITAVERN_PERF_TRACE_STARTED__;
+        performance.clearMeasures();
+    }
+});
+
+test('performance trace ignores diagnostics hook failures', () => {
+    globalThis.__TAURITAVERN_PERF_PROFILER__ = { capturing: true };
+    globalThis.__TAURITAVERN_PERF_TRACE_STARTED__ = () => {
+        throw new Error('diagnostics failure');
+    };
+
+    try {
+        assert.doesNotThrow(() => createPerformanceTrace('tt:test-hook-failure'));
+    } finally {
+        delete globalThis.__TAURITAVERN_PERF_PROFILER__;
+        delete globalThis.__TAURITAVERN_PERF_TRACE_STARTED__;
         performance.clearMeasures();
     }
 });

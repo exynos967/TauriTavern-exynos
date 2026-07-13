@@ -968,12 +968,13 @@ const worldInfoInFlight = new Map();
  * @param {number} maxContext - The maximum context size of the generation.
  * @param {boolean} isDryRun - If true, the function will not emit any events.
  * @param {WIGlobalScanData} globalScanData Chat independent context to be scanned
+ * @param {string|null} perfParentRunId Parent generation trace ID for diagnostics only
  * @returns {Promise<WIPromptResult>} The world info string and depth.
  */
-export async function getWorldInfoPrompt(chat, maxContext, isDryRun, globalScanData) {
+export async function getWorldInfoPrompt(chat, maxContext, isDryRun, globalScanData, perfParentRunId = null) {
     let worldInfoString = '', worldInfoBefore = '', worldInfoAfter = '';
 
-    const activatedWorldInfo = await checkWorldInfo(chat, maxContext, isDryRun, globalScanData);
+    const activatedWorldInfo = await checkWorldInfo(chat, maxContext, isDryRun, globalScanData, perfParentRunId);
     worldInfoBefore = activatedWorldInfo.worldInfoBefore;
     worldInfoAfter = activatedWorldInfo.worldInfoAfter;
     worldInfoString = worldInfoBefore + worldInfoAfter;
@@ -4900,14 +4901,16 @@ function parseDecorators(content) {
  * @param {number} maxContext The maximum context size of the generation.
  * @param {boolean} isDryRun Whether to perform a dry run.
  * @param {WIGlobalScanData} globalScanData Chat independent context to be scanned
+ * @param {string|null} perfParentRunId Parent generation trace ID for diagnostics only
  * @returns {Promise<WIActivated>} The world info activated.
  */
 //MARK: checkWorldInfo
-export async function checkWorldInfo(chat, maxContext, isDryRun, globalScanData = defaultGlobalScanData) {
+export async function checkWorldInfo(chat, maxContext, isDryRun, globalScanData = defaultGlobalScanData, perfParentRunId = null) {
     const perfTrace = createPerformanceTrace('tt:world-info', {
         chatMessages: chat.length,
         trigger: globalScanData.trigger,
         dryRun: Boolean(isDryRun),
+        parentRunId: perfParentRunId,
     });
 
     try {

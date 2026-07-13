@@ -9,7 +9,7 @@ const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..
 test('performance report exports generic operations and slow event listeners', async () => {
     const source = await readFile(path.join(REPO_ROOT, 'src/scripts/extensions/tauritavern-perf-profiler/index.js'), 'utf8');
 
-    assert.match(source, /schemaVersion:\s*5/);
+    assert.match(source, /schemaVersion:\s*6/);
     assert.match(source, /operations:\s*structuredClone\(state\.operations\)/);
     assert.match(source, /slowListeners:\s*structuredClone\(state\.slowListeners\)/);
     assert.match(source, /diagnostics:\s*runtimeDiagnostics\.snapshot\(\)/);
@@ -18,6 +18,9 @@ test('performance report exports generic operations and slow event listeners', a
     assert.match(source, /synchronousDurationMs/);
     assert.match(source, /waitDurationMs/);
     assert.match(source, /slowListenerDropped/);
+    assert.match(source, /__TAURITAVERN_PERF_TRACE_STARTED__/);
+    assert.match(source, /generationTraceRunId/);
+    assert.match(source, /unattributedTraces:\s*structuredClone\(state\.unattributedTraces\)/);
 });
 
 test('performance profiler captures interaction latency and heat signals only while enabled', async () => {
@@ -49,4 +52,6 @@ test('performance traces cover history prepend and message redisplay operations'
     assert.match(source, /perfTrace\.end\('context-preparation'/);
     assert.match(source, /perfTrace\.end\('history-preparation'/);
     assert.match(source, /perfTrace\.end\('prompt-finalization'/);
+    assert.match(source, /getWorldInfoPrompt\([^\n]+perfTrace\.runId\)/);
+    assert.match(source, /new StreamingProcessor\([^\n]+perfTrace\.runId\)/);
 });

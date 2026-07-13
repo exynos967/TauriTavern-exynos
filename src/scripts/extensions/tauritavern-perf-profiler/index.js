@@ -9,6 +9,7 @@ const MAX_FRAME_SAMPLES = 600;
 const MAX_CHAT_LOADS = 20;
 const MAX_SLOW_INTERACTIONS = 100;
 const MAX_OPERATIONS = 100;
+const MAX_UNATTRIBUTED_TRACES = 50;
 const MAX_SLOW_LISTENERS = 100;
 const SLOW_LISTENER_THRESHOLD_MS = 8;
 
@@ -27,6 +28,7 @@ const state = {
     chatLoads: [],
     slowInteractions: [],
     operations: [],
+    unattributedTraces: [],
     slowListeners: [],
     slowListenerObserved: 0,
     slowListenerDropped: 0,
@@ -62,8 +64,7 @@ function getCollectionSize(value) {
     return 0;
 }
 
-function createRecord(type, dryRun) {
-    const startedAt = now();
+function createRecord(type, dryRun, { startedAt = now(), generationTraceRunId = null } = {}) {
     return {
         id: state.nextId++,
         type: String(type ?? 'unknown'),
@@ -74,6 +75,7 @@ function createRecord(type, dryRun) {
         durationMs: null,
         finishReason: null,
         generation: {
+            traceRunId: generationTraceRunId,
             trace: null,
         },
         worldInfo: {
@@ -161,9 +163,40 @@ function onGenerationStarted(type, _options, dryRun) {
         return;
     }
 
+    if (state.current?.generation?.traceRunId) {
+        return;
+    }
+
     finalizeRecord('superseded');
     state.current = createRecord(type, dryRun);
     renderStatus();
+}
+
+function installTraceStartProfiler() {
+    globalThis.__TAURITAVERN_PERF_TRACE_STARTED__ = ({ prefix, runId, startedAt, detail } = {}) => {
+        if (!state.capturing || prefix !== 'tt:generation' || !runId) {
+            return;
+        }
+
+        finalizeRecord('superseded');
+        state.current = createRecord(detail?.type, detail?.dryRun, {
+            startedAt: Number(startedAt) || now(),
+            generationTraceRunId: String(runId),
+        });
+        renderStatus();
+    };
+}
+
+function storeUnattributedTrace(name, entry, trace, reason) {
+    state.unattributedTraces.push({
+        name,
+        startedAt: finiteRound(entry.startTime),
+        reason,
+        ...trace,
+    });
+    if (state.unattributedTraces.length > MAX_UNATTRIBUTED_TRACES) {
+        state.unattributedTraces.splice(0, state.unattributedTraces.length - MAX_UNATTRIBUTED_TRACES);
+    }
 }
 
 function onWorldInfoEntriesLoaded({ globalLore, characterLore, chatLore, personaLore } = {}) {
@@ -308,11 +341,20 @@ function installMeasureObserver() {
                     continue;
                 }
 
-                const record = [state.current, ...state.records.slice().reverse()]
-                    .find(candidate => candidate
-                        && candidate.startedAt <= entry.startTime + entry.duration
-                        && (candidate.endedAt === null || candidate.endedAt >= entry.startTime));
+                const expectedGenerationRunId = entry.name === 'tt:generation:total'
+                    ? trace.runId
+                    : trace.parentRunId;
+                const record = expectedGenerationRunId
+                    ? [state.current, ...state.records.slice().reverse()]
+                        .find(candidate => candidate?.generation?.traceRunId === expectedGenerationRunId)
+                    : null;
                 if (!record) {
+                    storeUnattributedTrace(
+                        entry.name.slice(3, -6),
+                        entry,
+                        trace,
+                        expectedGenerationRunId ? 'generation-record-not-found' : 'missing-parent-run-id',
+                    );
                     continue;
                 }
 
@@ -438,6 +480,7 @@ function startCapture() {
     installMeasureObserver();
     installInteractionObserver();
     installEventListenerProfiler();
+    installTraceStartProfiler();
     startFrameSampler();
     runtimeDiagnostics.start();
     renderStatus();
@@ -451,13 +494,14 @@ function stopCapture() {
     finalizeRecord('capture-stopped');
     state.capturing = false;
     delete globalThis.__TAURITAVERN_PERF_EVENT_LISTENER__;
+    delete globalThis.__TAURITAVERN_PERF_TRACE_STARTED__;
     runtimeDiagnostics.stop();
     renderStatus();
 }
 
 function snapshot() {
     return {
-        schemaVersion: 5,
+        schemaVersion: 6,
         exportedAt: new Date().toISOString(),
         userAgent: navigator.userAgent,
         viewport: {
@@ -470,6 +514,7 @@ function snapshot() {
         chatLoads: structuredClone(state.chatLoads),
         slowInteractions: structuredClone(state.slowInteractions),
         operations: structuredClone(state.operations),
+        unattributedTraces: structuredClone(state.unattributedTraces),
         slowListeners: structuredClone(state.slowListeners),
         listenerProfiler: getListenerProfilerSnapshot(),
         diagnostics: runtimeDiagnostics.snapshot(),
@@ -580,6 +625,7 @@ function createUi() {
         state.chatLoads = [];
         state.slowInteractions = [];
         state.operations = [];
+        state.unattributedTraces = [];
         state.slowListeners = [];
         state.slowListenerObserved = 0;
         state.slowListenerDropped = 0;

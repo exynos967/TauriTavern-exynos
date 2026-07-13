@@ -7,6 +7,7 @@ function isPerformanceTracingEnabled() {
 
 function createDisabledTrace() {
     return {
+        runId: null,
         start: () => 0,
         end: () => {},
         measure: (_name, action) => action(),
@@ -43,6 +44,17 @@ export function createPerformanceTrace(prefix, detail = {}) {
     const phases = {};
     let finished = false;
 
+    try {
+        globalThis.__TAURITAVERN_PERF_TRACE_STARTED__?.({
+            prefix,
+            runId,
+            startedAt,
+            detail: structuredClone(detail),
+        });
+    } catch {
+        // Diagnostics must never affect the traced operation.
+    }
+
     const record = (name, phaseStartedAt) => {
         const durationMs = perf.now() - phaseStartedAt;
         const current = phases[name] ?? { count: 0, durationMs: 0 };
@@ -62,6 +74,7 @@ export function createPerformanceTrace(prefix, detail = {}) {
     };
 
     return {
+        runId,
         start() {
             return perf.now();
         },
