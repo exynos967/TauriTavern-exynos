@@ -2,6 +2,34 @@
 var indexOf;
 var nextListenerRegistrationId = 1;
 var listenerRegistrations = new WeakMap();
+var sourceAttributedEvents = new Set([
+    'app_initialized',
+    'app_ready',
+    'settings_loaded',
+    'extension_settings_loaded',
+    'message_sent',
+    'message_received',
+    'message_updated',
+    'more_messages_loaded',
+    'user_message_rendered',
+    'character_message_rendered',
+    'chat_id_changed',
+    'chatLoaded',
+    'generation_started',
+    'GENERATION_AFTER_COMMANDS',
+    'generate_before_combine_prompts',
+    'generate_after_combine_prompts',
+    'generate_after_data',
+    'text_completion_settings_ready',
+    'chat_completion_settings_ready',
+    'chat_completion_prompt_ready',
+    'generation_stopped',
+    'generation_ended',
+    'stream_token_received',
+    'worldinfo_entries_loaded',
+    'worldinfo_scan_done',
+    'world_info_activated',
+]);
 
 function sanitizeRegistrationSource(stack) {
     if (typeof stack !== 'string') {
@@ -50,7 +78,9 @@ function registerListener(event, listener, method, originalListener = listener) 
     }
 
     const registrationId = nextListenerRegistrationId++;
-    const source = sanitizeRegistrationSource(new Error().stack);
+    const source = sourceAttributedEvents.has(event)
+        ? sanitizeRegistrationSource(new Error().stack)
+        : null;
     const listenerName = originalListener?.name || listener.name || '(anonymous)';
     const stableKey = source
         ? [event, method, source.modulePath, source.line, source.column, listenerName].join('|')
