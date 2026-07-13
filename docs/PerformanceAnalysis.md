@@ -4,8 +4,8 @@
 
 - 分析日期：2026-07-13
 - 当前分支：`optimization/worldbook-streaming`
-- 当前基线提交：`2683e713`（`perf: stop exact world-info counts at budget`）
-- 最新采样构建：TauriTavern 2.1.1 `arm64-v8a` optimization-8 Perf Release
+- 当前基线提交：`2d3a4b75`（Schema 9 性能监视器）
+- 最新采样构建：TauriTavern 2.1.1 `arm64-v8a` optimization-9 Perf Release
 - 主要测试设备：Android 15，360 x 792 CSS px，DPR 4，Android System WebView 149
 - 报告性质：现场性能证据、当前实现状态与优化优先级
 
@@ -18,7 +18,81 @@
 
 本文不把“原生客户端”视为性能保证。Tauri/Wry 替换了 Node/Express 后端和浏览器外壳，但 SillyTavern 前端、扩展生态、DOM、正则、Markdown、事件监听器和大量状态管理仍运行在 WebView 主线程。只要这些工作没有减少或移出关键路径，原生外壳不会自动消除卡顿和发热。
 
-## 核心结论：最严重的地方和根因
+## Schema 9 最新实测结论
+
+本节基于 `tauritavern-perf-2026-07-13T09-18-01.076Z.json`，文件 SHA-256 为 `6BB9093AA27964B4FBE0315B88A9F31835AD63E569B66C63D20C8F75FDA989FC`。原始报告保留在本地，不提交仓库。本节是当前优化决策的权威基线；后文 Schema 4 结论保留作历史对照，若两者冲突，以本节为准。
+
+### 严重度排名
+
+| 排名 | 严重位置 | 用户表现 | 根因 | Schema 9 实机证据 |
+| ---: | --- | --- | --- | --- |
+| 1（P0） | 重复且过期的 Prompt Manager dry run | 手机持续发热、按钮数秒无响应、预览操作越点越卡 | 新 dry run 只把旧记录标成 `superseded`，没有取消已经进入原生 `spawn_blocking` 的累计前缀 tokenization；多个任务重叠后争用 CPU | 20 次生成中 16 次 dry run；dry run 世界书累计 214.3 s，其中 token 统计 198.8 s；最坏单次 34.5 s；dry-run 时间窗 CPU 平均 98%，P95 195.6% |
+| 2（P0） | 第三方扩展及变量事件监听链 | 发送后、输出结束、切换聊天和自动化执行时卡住 | EventEmitter 为保持兼容性按注册顺序 `await`；扩展在消息、请求体和聊天切换事件中执行秒级异步工作 | `ST-Prompt-Template` 132 次累计等待 145.0 s；`JS-Slash-Runner` 90 次累计等待 31.2 s；未归因变量监听器累计等待 48.2 s |
+| 3（P1） | 聊天切换后的监听器 | 点聊天后楼层迟迟不出现 | payload 读取和楼层 DOM 渲染完成后，`chat_id_changed` 等监听器仍串行阻塞完成状态 | 最慢一次仅 1 条消息，总计 19.84 s；渲染 28.3 ms，监听器 13.43 s |
+| 4（P1） | 常驻 DOM、WebView 内存与后台计算 | 普通菜单和按钮首帧慢，长时间使用余量不足 | 隐藏设置页和扩展 UI 常驻，叠加 dry run、保存和扩展刷新，使 WebView 长期无法回到低负载 | DOM 平均 21,816、最高 25,974；同屏消息 P50 仅 5；RSS 平均 358 MiB、最高 573 MiB；进程 CPU 平均 63.1% |
+| 5（P2） | 流式全量格式化 | 长输出期间发热、偶发掉帧 | 中间预览仍会对增长后的完整文本执行 regex、Markdown、sanitize 和 DOM commit，但移动端合帧已显著降低其相对占比 | 4 次真实生成 18,974 chunks、3,877 次 DOM render；格式化累计 2.98 s、DOM commit 675 ms |
+| 6（P2） | 设置、角色和世界书持久化 | 打开页面、切换角色或保存时额外等待 | 完整 settings 读写、角色写入和世界书保存调用较重，且存在重复请求 | `/api/settings/get` 20 次累计 22.4 s；`settings/patch` 20 次累计 15.3 s；`characters/edit` 8 次累计 10.9 s |
+
+### 第一根因：dry run 计算风暴
+
+Prompt Manager 的 `render()` 默认先调用 `tryGenerate()`，而 OpenAI Prompt Manager 将它实现为 `Generate('normal', {}, true)`。这条 dry run 会执行完整的上下文准备、世界书扫描和 token budget 计算，只跳过真实模型请求。
+
+本次报告中的 16 次 dry run 有 15 次被后续任务标记为 `superseded`，但“替代”只发生在性能记录层。已经进入 Rust `count_openai_token_prefixes` 的任务会在 `spawn_blocking` 中继续遍历 suffix，并对不断增长的完整前缀重复分词，没有取消令牌。最坏时间段连续产生多个重叠 dry run：单次 token 阶段从正常的数百毫秒膨胀到 8.6、12.5、19.7、24.2、30.3、31.8 和 34.5 秒。
+
+聚合结果进一步排除了“真实流式网络导致主要发热”的解释：
+
+- 16 次 dry run 的 generation trace 累计 277.5 s，世界书 214.3 s，token 统计 198.8 s；
+- 4 次真实生成的世界书累计 9.85 s，token 统计累计 5.81 s；
+- dry-run 时间窗 CPU 平均 98%，真实流式时间窗 CPU 平均 60.7%；
+- dry-run 时间窗主线程 busy ratio 平均 0.67，真实流式时间窗为 0.077。
+
+优化不能简单复用上一次 dry-run prompt，因为动态宏、概率、timed effects、扩展事件和聊天状态可能变化。安全边界是：合并尚未开始的重复预览、让最新请求胜出，并使已过期的 token 任务在可验证的条目边界协作取消；任何真正执行的 dry run 仍必须走原来的完整计算。
+
+### 第二根因：已精准归属的扩展监听器
+
+Schema 9 在监听器注册时记录了稳定身份、模块和扩展 ID，因此旧报告中的压缩函数名已经可以归属：
+
+| 来源 | 慢调用数 | 累计总时长 | 同步执行 | await 等待 | 单次最大 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `third-party/ST-Prompt-Template` | 132 | 145.36 s | 341 ms | 145.02 s | 3.62 s |
+| 未归因变量监听器 | 33 | 48.38 s | 227 ms | 48.15 s | 7.95 s |
+| `third-party/JS-Slash-Runner` | 90 | 31.75 s | 533 ms | 31.22 s | 10.45 s |
+| 核心 `scripts/world-info.js` | 19 | 8.12 s | 18 ms | 8.11 s | 1.29 s |
+| `third-party/ST-BaiBai-Tools` | 79 | 2.08 s | 1.21 s | 862 ms | 84 ms |
+| `Extension-TypingIndicator` | 24 | 928 ms | 918 ms | 10 ms | 74 ms |
+
+累计总时长包含父命令等待子命令的嵌套，不能作为独立 CPU 时间相加。`ST-Prompt-Template` 与 `JS-Slash-Runner` 的大部分成本是 await 等待，主要增加端到端延迟；`ST-BaiBai-Tools` 与 Typing Indicator 的同步部分更接近主线程 CPU 成本。
+
+Slash Command 记录显示 `/run` 和内部 `/if` 单次最高约 43.2 s，`/buttons` 最高 20.1 s。它们属于用户自动化的真实执行，不能通过跳过、改并行或改变事件顺序来“优化”。可实施方向仅限于去除框架重复读取/刷新、合并相同派生工作，并由等价性测试证明输出、变量、事件顺序和最终请求体不变。
+
+### 聊天切换与按钮卡顿
+
+聊天切换的 payload 和 DOM 不是当前主瓶颈：
+
+- 加载 31 条消息：总计 4.50 s，消息渲染 230 ms，监听器 3.77 s；
+- 加载 23 条消息：总计 3.94 s，消息渲染 308 ms，监听器 3.23 s；
+- 加载 1 条消息的最坏样本：总计 19.84 s，消息渲染 28.3 ms，监听器 13.43 s。
+
+按钮 handler 本身也通常很短。发送按钮最坏首个有效帧为 848.6 ms，随后立刻进入 4.51 s 世界书计算，其中 token 统计 3.10 s。消息编辑完成的最坏首帧为 2.93 s，扩展菜单最高 681.6 ms。用户感知的“按钮卡”主要是点击后同步触发的派生工作和主线程拥塞，不是图标或 click handler 本身。
+
+### 流式、内存和发热
+
+移动端流式合帧有效：4 次真实生成共 18,974 chunks，实际 DOM render 3,877 次，约每 4.9 个 chunk 更新一次。格式化累计 2.98 s、DOM commit 675 ms、token 事件监听累计 1.82 s。它仍会造成持续功耗，但不再是数秒冻结的第一原因。
+
+健康采样覆盖 16.1 分钟：进程 CPU 平均 63.1%、P95 88%、最高 291.6%；事件循环延迟 P95 425 ms，最长阻塞 19.1 s。设备没有提供电池温度和电流，因此只能用进程 CPU、主线程 busy ratio、长任务和 RSS 作为发热代理，不能声称已经测得温升或电流改善。
+
+### 当前优化顺序和兼容边界
+
+1. Prompt Manager dry run 使用 latest-wins 调度，避免尚未开始的过期预览进入完整生成流程；
+2. 为原生累计前缀 token 统计增加协作取消，过期任务在条目边界退出；
+3. 对完全相同且不可变的 token 请求做 single-flight/有界 memo，结果必须逐项等同；
+4. 针对已归属扩展，只优化宿主重复工作，不改变扩展代码、事件顺序和 await 语义；
+5. 合并同 revision settings 读取和重复保存，保持 API、存储结构与错误语义；
+6. 仅对能证明未被扩展同步查询的隐藏 UI 延迟初始化；更激进 DOM 卸载只记录，不直接实施。
+
+所有阶段继续遵守以下硬约束：最终请求体的字段、数组顺序和 provider metadata 不变；世界书激活、预算、宏和 timed effects 不变；事件顺序和 await 语义不变；最终消息仍执行完整 regex、Markdown、sanitize、扩展事件和保存流程。
+
+## 历史阶段结论：Schema 4 基线（保留作对照）
 
 ### 严重度排名
 
