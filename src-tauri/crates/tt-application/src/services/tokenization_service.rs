@@ -83,28 +83,14 @@ impl TokenizationService {
 
         let tokenizer_repository = Arc::clone(&self.tokenizer_repository);
         let model = model.into_owned();
-        let mut content = dto.base;
+        let base = dto.base;
         let suffixes = dto.suffixes;
         let stop_at = dto.stop_at;
 
         let token_counts = tokio::task::spawn_blocking(move || {
-            let mut token_counts = Vec::with_capacity(suffixes.len());
-
-            for suffix in &suffixes {
-                content.push_str(suffix);
-                let message = serde_json::json!({ "role": "system", "content": content });
-                let token_count = tokenizer_repository
-                    .count_messages(&model, &[message])
-                    .map_err(ApplicationError::from)?;
-                token_counts.push(token_count);
-
-                if stop_at.is_some_and(|limit| token_count.saturating_sub(1) >= limit) {
-                    token_counts.resize(suffixes.len(), token_count);
-                    break;
-                }
-            }
-
-            Ok::<_, ApplicationError>(token_counts)
+            tokenizer_repository
+                .count_system_message_prefixes(&model, &base, &suffixes, stop_at)
+                .map_err(ApplicationError::from)
         })
         .await
         .map_err(|error| {

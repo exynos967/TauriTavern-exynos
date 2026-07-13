@@ -193,22 +193,26 @@ TauriTavern 核心的世界书排序只有约 1 ms，**不是** `ST-Prompt-Templ
 - TauriTavern 核心慢在对象准备、hash、clone 和多轮扫描；
 - 插件慢在比较器内部重复全数组扫描。
 
-提交 `10ef622b` 已把 entries prepare 的两次连续 `map()` 合为一次遍历，减少一份 5,363 条中间数组及第二轮对象展开。新实现仍在添加 `hash` 前对 `{ ...entry, decorators, content }` 执行相同的 `JSON.stringify`；等价测试覆盖原有 hash 字段、空内容、嵌套数据和属性顺序。5,363 条合成数据 20 轮结果逐项一致，helper 平均耗时降低约 5.3%，但尚未通过 Android 实机确认完整 `entries-prepare` 收益。
+提交 `10ef622b` 已把 entries prepare 的两次连续 `map()` 合为一次遍历，减少一份 5,363 条中间数组及第二轮对象展开。新实现仍在添加 `hash` 前对 `{ ...entry, decorators, content }` 执行相同的 `JSON.stringify`；等价测试覆盖原有 hash 字段、空内容、嵌套数据和属性顺序。Schema 10 Android 实机复测中，同为 5,363 条的 `entries-prepare` 平均从 413.5 ms 降至 195.6 ms，降低 52.7%；完整世界书平均从 1.747 s 降至 1.345 s，降低 23.0%。该对照仍会受触发条目和 Token cache 热度影响，但准备阶段的降幅已经脱离噪声范围。
 
 更高收益的 prepared-entry cache 需要覆盖世界书保存、删除、导入、角色/人格/聊天绑定、设置变化和扩展事件修改，尚不具备足够失效证据。
 
 ### 4.2 世界书扫描与 Token
 
-最新复测的 9 次完整 dry run（包含导出时的 current record）每次均处理 5,363 条世界书：
+Schema 10 报告 `tauritavern-perf-2026-07-13T17-12-14.103Z.json` 共记录 217 次 tokenizer native 调用：
 
-- entry scan 平均 540.5 ms，最大 731.1 ms；
-- Token 平均 790.9 ms，最大 2.70 s；
-- 完整世界书平均 1.97 s，最大 4.08 s；
-- 通常递归扫描 3–4 轮。
+- `count_openai_token_prefixes` 52 次，累计 6.458 s，平均 124.2 ms，P95 540 ms，最大 735 ms；
+- `count_openai_tokens_batch` 165 次，累计 4.204 s，平均 25.5 ms，P95 48 ms，最大 472 ms；
+- broker 排队累计只有 118 ms，单次最大 4 ms；
+- 世界书 Token 阶段随激活内容从约 40–126 ms 波动到 1.37–1.82 s。
 
-相比 12:04 样本，dry run 平均值有所回升，但 4 次真实生成的世界书阶段平均 1.25 s，与前次 1.18 s 接近。两轮采集的 Token cache 热度、触发顺序和内容并不相同，因此不能据此认定现有优化回归；最大 2.70 s 表明冷/排队路径仍需进一步拆分。
+数据证明主要耗时不是 JS broker 队列，而是 Tauri transport 与 Rust native 分词的合计。原 prefix 实现对每个累计后缀从头计算完整字符串，64 条批次会重复扫描越来越长的共同前缀。
 
 提交 `9a99d2c8` 将性能报告升级为 Schema 10，为 `count_openai_tokens_batch` 和 `count_openai_token_prefixes` 记录 `cache/dedupe/transport` outcome、broker 限流队列等待和 transport 时长。样本不包含 model、文本、messages、DTO 或 dedupe key，采集关闭时不读取时钟。这里的 transport 仍是 Tauri IPC 与 Rust native 执行的合计，尚不能单独表示 tokenizer 内部 CPU。
+
+后续优化把 prefix 计数下沉为 `TokenizerRepository` 的窄接口。OpenAI/tiktoken 路径利用 tokenizer 的稳定正则分段边界，只保留可能受下一个后缀影响的末尾片段并重新编码；已确定稳定的共同前缀不再重复扫描。其他 tokenizer 后端继续使用原始完整消息计数。外部 URL、`model/base/suffixes/stop_at` DTO、`token_counts` 返回数组和达到 `stop_at` 后填充剩余结果的语义均未改变。
+
+等价测试覆盖 `gpt-4o`、`gpt-4`、`gpt-3.5-turbo-0301`、`o1`，以及空片段、连续空白、换行、标点、中文、emoji、组合字符和类 special-token 文本，每组 64 个累计后缀均逐项对照原完整重算。Windows Debug 合成压力基准中，6 轮交替测试由 26.21 s 降至 0.755 s，约为原耗时的 2.9%；该结果只用于验证复杂度下降，不代表 Android 实机最终倍率，仍需用下一份 Schema 10 报告复测。
 
 剩余优化必须保留：
 
