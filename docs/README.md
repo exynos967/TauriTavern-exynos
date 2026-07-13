@@ -14,6 +14,7 @@
 8. [扩展 API 文档](./API/README.md) - `window.__TAURITAVERN__.api.*` 的参考与适配指南（面向扩展作者）
 9. [Agent 架构文档](./AgentArchitecture.md) - Agent Runtime 的高层架构入口
 10. [Agent 细节文档](./Agent/README.md) - Workspace、Journal、Tool、LLM Gateway、MCP/SKILL 与测试策略
+11. [性能问题完整分析](./PerformanceAnalysis.md) - Android 实机采样、当前瓶颈、已落地优化、行为契约与复测基线
 
 ## 项目概述
 
