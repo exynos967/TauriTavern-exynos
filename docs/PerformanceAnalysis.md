@@ -193,7 +193,9 @@ TauriTavern 核心的世界书排序只有约 1 ms，**不是** `ST-Prompt-Templ
 - TauriTavern 核心慢在对象准备、hash、clone 和多轮扫描；
 - 插件慢在比较器内部重复全数组扫描。
 
-当前可考虑的低风险小改是合并两次连续 `map()`，减少中间数组和对象分配。更高收益的 prepared-entry cache 需要覆盖世界书保存、删除、导入、角色/人格/聊天绑定、设置变化和扩展事件修改，尚不具备足够失效证据。
+提交 `10ef622b` 已把 entries prepare 的两次连续 `map()` 合为一次遍历，减少一份 5,363 条中间数组及第二轮对象展开。新实现仍在添加 `hash` 前对 `{ ...entry, decorators, content }` 执行相同的 `JSON.stringify`；等价测试覆盖原有 hash 字段、空内容、嵌套数据和属性顺序。5,363 条合成数据 20 轮结果逐项一致，helper 平均耗时降低约 5.3%，但尚未通过 Android 实机确认完整 `entries-prepare` 收益。
+
+更高收益的 prepared-entry cache 需要覆盖世界书保存、删除、导入、角色/人格/聊天绑定、设置变化和扩展事件修改，尚不具备足够失效证据。
 
 ### 4.2 世界书扫描与 Token
 
@@ -205,6 +207,8 @@ TauriTavern 核心的世界书排序只有约 1 ms，**不是** `ST-Prompt-Templ
 - 通常递归扫描 3–4 轮。
 
 相比 12:04 样本，dry run 平均值有所回升，但 4 次真实生成的世界书阶段平均 1.25 s，与前次 1.18 s 接近。两轮采集的 Token cache 热度、触发顺序和内容并不相同，因此不能据此认定现有优化回归；最大 2.70 s 表明冷/排队路径仍需进一步拆分。
+
+提交 `9a99d2c8` 将性能报告升级为 Schema 10，为 `count_openai_tokens_batch` 和 `count_openai_token_prefixes` 记录 `cache/dedupe/transport` outcome、broker 限流队列等待和 transport 时长。样本不包含 model、文本、messages、DTO 或 dedupe key，采集关闭时不读取时钟。这里的 transport 仍是 Tauri IPC 与 Rust native 执行的合计，尚不能单独表示 tokenizer 内部 CPU。
 
 剩余优化必须保留：
 
@@ -314,6 +318,8 @@ source map 将性能报告中的 `dist/index.js:191:28447`、压缩函数 `r` �
 | `2363ea41` | 移动端限制流式预览刷新 | 最终消息仍完整渲染 |
 | `c9d427c6` | 长聊天楼层分批渲染 | 楼层 ID 和顺序不变 |
 | `7558fdd5`、`dae0540b` | 集中滚动控制并保留 viewport | 尊重用户 scroll lock |
+| `10ef622b` | entries prepare 合并为单次遍历 | hash 输入、属性顺序和最终对象逐项等价 |
+| `9a99d2c8` | Tokenizer broker 队列与 transport 精准埋点 | 只读观测，不修改 DTO、策略、结果或异常 |
 
 动态宏、概率、timed effects、扩展事件、世界书激活顺序和最终请求体仍由每次真正执行的完整流程计算。
 
@@ -321,9 +327,9 @@ source map 将性能报告中的 `dist/index.js:191:28447`、压缩函数 `r` �
 
 ### P0：收敛 TauriTavern 世界书固定成本
 
-1. 先评估合并 entries prepare 两次 `map()` 的实际收益；
+1. 用 Schema 10 实机复测 entries prepare、Tokenizer queue、transport、cache 和 dedupe；
 2. 给聊天切换预热拆分 prefetch、扩展事件、prepare/hash/clone 阶段；
-3. 单独记录 Tokenizer 队列等待、native 执行和 exact dedupe 命中，解释 2.70 s 最大值；
+3. 根据 queue/transport 占比决定下一步处理调度还是 Rust tokenizer；
 4. 只有建立完整 revision/失效模型后才考虑 prepared-entry cache；
 5. 用冻结输入双执行比较激活条目、顺序、Token budget 和最终请求体。
 
@@ -456,10 +462,10 @@ optimization-9 样本 SHA-256：`6BB9093AA27964B4FBE0315B88A9F31835AD63E569B66C6
 
 ## 11. 埋点缺口
 
-Schema 9 已覆盖 generation、世界书、流式、聊天加载、交互、网络、监听器稳定身份、扩展来源、Slash Command、Quick Reply 和 Android CPU fallback。剩余缺口：
+当前代码的 Schema 10 已覆盖 generation、世界书、流式、聊天加载、交互、网络、监听器稳定身份、扩展来源、Slash Command、Quick Reply、Android CPU fallback，以及 Tokenizer broker queue/transport/cache/dedupe。最新实机样本仍是 Schema 9，新增字段需下一轮构建复测。剩余缺口：
 
 1. Prompt Manager dry run 的触发来源、合并次数、排队时间和实际执行次数；
-2. Tokenizer 队列深度、排队时间、native 执行时间和 exact dedupe 命中；
+2. Rust tokenizer 内部排队、模型加载和实际 encode CPU 的进一步拆分；
 3. 世界书 prepared-entry cache 所需的 revision 和失效来源；
 4. DOM 节点模块归属和 detached node；
 5. settings 请求调用方、字节数和磁盘阶段；
