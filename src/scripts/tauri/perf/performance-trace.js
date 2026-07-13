@@ -12,6 +12,7 @@ function createDisabledTrace() {
         end: () => {},
         measure: (_name, action) => action(),
         measureAsync: (_name, action) => action(),
+        snapshotPhases: () => ({}),
         finish: () => {},
     };
 }
@@ -73,6 +74,11 @@ export function createPerformanceTrace(prefix, detail = {}) {
         }
     };
 
+    const snapshotPhases = () => Object.fromEntries(Object.entries(phases).map(([name, phase]) => [name, {
+        count: phase.count,
+        durationMs: Math.round(phase.durationMs * 10) / 10,
+    }]));
+
     return {
         runId,
         start() {
@@ -97,16 +103,14 @@ export function createPerformanceTrace(prefix, detail = {}) {
                 record(name, phaseStartedAt);
             }
         },
+        snapshotPhases,
         finish(result = {}) {
             if (finished) {
                 return;
             }
             finished = true;
             const durationMs = perf.now() - startedAt;
-            const normalizedPhases = Object.fromEntries(Object.entries(phases).map(([name, phase]) => [name, {
-                count: phase.count,
-                durationMs: Math.round(phase.durationMs * 10) / 10,
-            }]));
+            const normalizedPhases = snapshotPhases();
 
             try {
                 perf.measure(`${prefix}:total`, {

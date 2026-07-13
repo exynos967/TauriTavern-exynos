@@ -11,6 +11,7 @@ const MAX_SLOW_INTERACTIONS = 100;
 const MAX_OPERATIONS = 100;
 const MAX_UNATTRIBUTED_TRACES = 50;
 const MAX_AUTOMATION_SAMPLES = 300;
+const MAX_STREAM_FORMAT_SAMPLES = 300;
 const MAX_SLOW_LISTENERS = 100;
 const SLOW_LISTENER_THRESHOLD_MS = 8;
 
@@ -33,6 +34,9 @@ const state = {
     automationSamples: [],
     automationObserved: 0,
     automationDropped: 0,
+    streamFormatSamples: [],
+    streamFormatObserved: 0,
+    streamFormatDropped: 0,
     slowListeners: [],
     slowListenerObserved: 0,
     slowListenerDropped: 0,
@@ -461,6 +465,35 @@ function getAutomationProfilerSnapshot() {
     };
 }
 
+function installStreamFormatProfiler() {
+    globalThis.__TAURITAVERN_PERF_STREAM_FORMAT__ = sample => {
+        if (!state.capturing || !sample || typeof sample !== 'object') {
+            return;
+        }
+
+        state.streamFormatObserved += 1;
+        state.streamFormatSamples.push({
+            ...structuredClone(sample),
+            durationMs: finiteRound(sample.durationMs),
+            observedAt: finiteRound(now()),
+        });
+        if (state.streamFormatSamples.length > MAX_STREAM_FORMAT_SAMPLES) {
+            const dropped = state.streamFormatSamples.length - MAX_STREAM_FORMAT_SAMPLES;
+            state.streamFormatSamples.splice(0, dropped);
+            state.streamFormatDropped += dropped;
+        }
+    };
+}
+
+function getStreamFormatProfilerSnapshot() {
+    return {
+        observed: state.streamFormatObserved,
+        stored: state.streamFormatSamples.length,
+        dropped: state.streamFormatDropped,
+        samples: structuredClone(state.streamFormatSamples),
+    };
+}
+
 function getListenerProfilerSnapshot() {
     return {
         thresholdMs: SLOW_LISTENER_THRESHOLD_MS,
@@ -515,6 +548,7 @@ function startCapture() {
     installEventListenerProfiler();
     installTraceStartProfiler();
     installAutomationProfiler();
+    installStreamFormatProfiler();
     startFrameSampler();
     runtimeDiagnostics.start();
     renderStatus();
@@ -530,13 +564,14 @@ function stopCapture() {
     delete globalThis.__TAURITAVERN_PERF_EVENT_LISTENER__;
     delete globalThis.__TAURITAVERN_PERF_TRACE_STARTED__;
     delete globalThis.__TAURITAVERN_PERF_AUTOMATION__;
+    delete globalThis.__TAURITAVERN_PERF_STREAM_FORMAT__;
     runtimeDiagnostics.stop();
     renderStatus();
 }
 
 function snapshot() {
     return {
-        schemaVersion: 7,
+        schemaVersion: 8,
         exportedAt: new Date().toISOString(),
         userAgent: navigator.userAgent,
         viewport: {
@@ -553,6 +588,7 @@ function snapshot() {
         slowListeners: structuredClone(state.slowListeners),
         listenerProfiler: getListenerProfilerSnapshot(),
         automationProfiler: getAutomationProfilerSnapshot(),
+        streamFormatProfiler: getStreamFormatProfilerSnapshot(),
         diagnostics: runtimeDiagnostics.snapshot(),
     };
 }
@@ -669,6 +705,9 @@ function createUi() {
         state.automationSamples = [];
         state.automationObserved = 0;
         state.automationDropped = 0;
+        state.streamFormatSamples = [];
+        state.streamFormatObserved = 0;
+        state.streamFormatDropped = 0;
         runtimeDiagnostics.clear();
         renderStatus();
     });

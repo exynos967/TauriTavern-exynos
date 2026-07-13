@@ -17,6 +17,7 @@ test('performance trace aggregates repeated phases into the total measure', asyn
         assert.equal(started[0].detail.source, 'test');
         assert.equal(trace.measure('work', () => 42), 42);
         await trace.measureAsync('work', async () => Promise.resolve());
+        assert.equal(trace.snapshotPhases().work.count, 2);
         trace.finish({ success: true });
         trace.finish({ success: false });
 

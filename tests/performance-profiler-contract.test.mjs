@@ -9,7 +9,7 @@ const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..
 test('performance report exports generic operations and slow event listeners', async () => {
     const source = await readFile(path.join(REPO_ROOT, 'src/scripts/extensions/tauritavern-perf-profiler/index.js'), 'utf8');
 
-    assert.match(source, /schemaVersion:\s*7/);
+    assert.match(source, /schemaVersion:\s*8/);
     assert.match(source, /operations:\s*structuredClone\(state\.operations\)/);
     assert.match(source, /slowListeners:\s*structuredClone\(state\.slowListeners\)/);
     assert.match(source, /diagnostics:\s*runtimeDiagnostics\.snapshot\(\)/);
@@ -23,6 +23,8 @@ test('performance report exports generic operations and slow event listeners', a
     assert.match(source, /unattributedTraces:\s*structuredClone\(state\.unattributedTraces\)/);
     assert.match(source, /automationProfiler:\s*getAutomationProfilerSnapshot\(\)/);
     assert.match(source, /__TAURITAVERN_PERF_AUTOMATION__/);
+    assert.match(source, /streamFormatProfiler:\s*getStreamFormatProfilerSnapshot\(\)/);
+    assert.match(source, /__TAURITAVERN_PERF_STREAM_FORMAT__/);
 });
 
 test('automation diagnostics omit script text and command arguments', async () => {
@@ -74,4 +76,7 @@ test('performance traces cover history prepend and message redisplay operations'
     assert.match(source, /perfTrace\.end\('prompt-finalization'/);
     assert.match(source, /getWorldInfoPrompt\([^\n]+perfTrace\.runId\)/);
     assert.match(source, /new StreamingProcessor\([^\n]+perfTrace\.runId\)/);
+    assert.match(source, /reportStreamingFormatSample\(\{/);
+    assert.match(source, /inputChars:\s*String\(text \?\? ''\)\.length/);
+    assert.match(source, /diffStreamingPhases\(phasesBefore, this\.perfTrace\.snapshotPhases\(\)\)/);
 });

@@ -18,6 +18,7 @@ import { createPerformanceTrace } from './scripts/tauri/perf/performance-trace.j
 import { createChatScrollController } from './scripts/tauri/perf/chat-scroll-controller.js';
 import { getMessageRenderBatches } from './scripts/tauri/perf/message-render-batches.js';
 import { getStreamingRenderInterval } from './scripts/tauri/perf/streaming-render-policy.js';
+import { diffStreamingPhases, isStreamingFormatProfilingEnabled, reportStreamingFormatSample } from './scripts/tauri/perf/streaming-format-profiler.js';
 import {
     isTauriChatPayloadTransportEnabled,
     loadCharacterChatPayload,
@@ -4387,6 +4388,9 @@ class StreamingProcessor {
     }
 
     async onProgressStreaming(messageId, text, isFinal) {
+        const profileStreamFormat = isStreamingFormatProfilingEnabled();
+        const formatStartedAt = profileStreamFormat ? performance.now() : 0;
+        const phasesBefore = profileStreamFormat ? this.perfTrace.snapshotPhases() : null;
         const isImpersonate = this.type == 'impersonate';
         const isContinue = this.type == 'continue';
         const cleanupStartedAt = this.perfTrace.start();
@@ -4478,6 +4482,18 @@ class StreamingProcessor {
                     } else {
                         this.messageTextDom.innerHTML = formattedText;
                     }
+                });
+            }
+
+            if (profileStreamFormat) {
+                reportStreamingFormatSample({
+                    streamRunId: this.perfTrace.runId,
+                    inputChars: String(text ?? '').length,
+                    processedChars: processedText.length,
+                    formattedChars: formattedText.length,
+                    final: Boolean(isFinal),
+                    durationMs: performance.now() - formatStartedAt,
+                    phases: diffStreamingPhases(phasesBefore, this.perfTrace.snapshotPhases()),
                 });
             }
 
