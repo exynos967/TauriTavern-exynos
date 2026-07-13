@@ -23,7 +23,7 @@ Schema 9 reports additionally include:
 ## Privacy and overhead
 
 - Reports do not include chat text, generated text, input values, Quick Reply labels/scripts, slash-command arguments, command results, or settings payloads.
-- Quick Reply set/source identities are one-way local hashes. Request records contain method, origin category, and path without query strings or bodies.
+- Quick Reply set/source identities are deterministic non-plaintext hashes for local correlation, not cryptographic anonymization. Request records contain method, origin category, and path without query strings or bodies.
 - Source attribution strips desktop workspace prefixes and keeps repository-relative module paths where possible. Registration stacks are captured only for generation, message, chat, world-info, streaming, settings, and extension-startup events; other events retain low-cost registration metadata.
 - Expensive runtime hooks, per-render phase snapshots, automation timing, and history batch timing are inactive while capture is stopped. Event registration metadata is recorded once when a listener is registered so Release builds can be attributed later.
 - Listener, automation, formatting, history, network, invoke, interaction, and health collections are bounded. Reports include observed/stored/dropped counts where truncation is relevant.
