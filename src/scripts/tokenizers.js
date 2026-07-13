@@ -7,6 +7,7 @@ import { getStringHash } from './utils.js';
 import { kai_flags, kai_settings } from './kai-settings.js';
 import { textgen_types, textgenerationwebui_settings as textgen_settings, getTextGenServer, getTextGenModel } from './textgen-settings.js';
 import { getCurrentDreamGenModelTokenizer, getCurrentOpenRouterModelTokenizer, openRouterModels } from './textgen-models.js';
+import { createSingleFlight } from './util/single-flight.js';
 
 export const CHARACTERS_PER_TOKEN_RATIO = 3.35;
 export const TOKENIZER_WARNING_KEY = 'tokenizationWarningShown';
@@ -35,6 +36,8 @@ export const tokenizers = {
     COMMAND_A: 19,
     BEST_MATCH: 99,
 };
+
+const countTokenPrefixesSingleFlight = createSingleFlight();
 
 // A list of local tokenizers that support encoding and decoding token ids.
 export const ENCODE_TOKENIZERS = [
@@ -730,14 +733,16 @@ export async function getTokenPrefixCountsAsync(base, suffixes, padding = undefi
         }
 
         try {
-            const data = await jQuery.ajax({
+            const requestBody = JSON.stringify({ base, suffixes, stop_at: stopAt });
+            const requestKey = `${model}\n${requestBody}`;
+            const data = await countTokenPrefixesSingleFlight(requestKey, () => jQuery.ajax({
                 async: true,
                 type: 'POST',
                 url: `/api/tokenizers/openai/count-prefix-batch?model=${model}`,
-                data: JSON.stringify({ base, suffixes, stop_at: stopAt }),
+                data: requestBody,
                 dataType: 'json',
                 contentType: 'application/json',
-            });
+            }));
 
             if (Array.isArray(data?.token_counts) && data.token_counts.length === suffixes.length) {
                 for (let index = 0; index < data.token_counts.length; index++) {

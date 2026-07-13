@@ -32,7 +32,9 @@ test('Prefix token counts use compact native payload with an exact fallback', as
 
     assert.match(source, /export async function getTokenPrefixCountsAsync/);
     assert.match(source, /count-prefix-batch/);
-    assert.match(source, /JSON\.stringify\(\{ base, suffixes, stop_at: stopAt \}\)/);
+    assert.match(source, /const requestBody = JSON\.stringify\(\{ base, suffixes, stop_at: stopAt \}\)/);
+    assert.match(source, /countTokenPrefixesSingleFlight\(requestKey/);
+    assert.match(source, /data: requestBody/);
     assert.match(source, /cacheState\.cache\[cacheKeys\[index\]\]/);
     assert.match(source, /using exact batch fallback/);
     assert.match(source, /return getTokenCountsAsync\(prefixes, padding\)/);
