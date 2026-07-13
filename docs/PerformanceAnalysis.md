@@ -243,7 +243,7 @@ source map 将性能报告中的 `dist/index.js:191:28447`、压缩函数 `r` �
 
 因此，现有数据只能证明“某些 iframe 用户脚本 listener 较慢”，不能证明 JS-Slash-Runner 桥接算法本身较慢。Slash Command 自动化样本集中在采集开始后约 107–137 秒，而上述 prompt-ready 慢监听窗口位于约 437–854 秒，两者没有时间重叠；`/buttons` 用户等待不是这些监听器的根因。
 
-源码审计另行发现 `eventOn/eventMakeFirst/eventMakeLast/eventOnce` 返回的 `stop()` 使用包装函数反查原始 listener，导致手动卸载失效。JS-Slash-Runner 分支 `fix/event-listener-stop` 的提交 `a7238de8` 已修复并覆盖 6 项测试，生产构建通过。该修复降低长时间运行后残留或重复回调风险，但**不应被描述为本次 526.4 ms 的直接优化**。
+源码审计另行发现 `eventOn/eventMakeFirst/eventMakeLast/eventOnce` 返回的 `stop()` 使用包装函数反查原始 listener，可能导致手动卸载失效。但本次性能报告没有出现 registration ID 持续增长或重复监听证据，iframe `pagehide` 仍会调用 `eventClearAll()` 完成清理；该问题与 526.4 ms 慢监听也没有直接关系，因此按 YAGNI 不在本轮修改。
 
 下一步需要把 iframe 名称或稳定匿名 script ID 附加到事件桥接注册元数据，才能在不采集脚本内容的前提下定位具体用户脚本。不能并行、缓存或跳过通用桥接，因为这会改变脚本顺序、变量状态和最终请求体。
 
