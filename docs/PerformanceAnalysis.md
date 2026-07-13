@@ -6,17 +6,17 @@
 - TauriTavern 分支：`optimization/performance`
 - 最新实测代码：`104c5a7b`（optimization-10）
 - 最新实测构建：TauriTavern 2.1.1 `arm64-v8a` optimization-10 Perf Release
-- 最新性能样本：`tauritavern-perf-2026-07-13T12-04-56.407Z.json`
-- 样本 SHA-256：`42FE59A5E04C9AFE8C96030AF36401EE57F97CA87E2CC0FB899599F56EB70142`
+- 最新性能样本：`tauritavern-perf-2026-07-13T15-03-56.482Z.json`
+- 样本 SHA-256：`E84DFF9837F203F68EE6FA8997192DA19C8C5DD3576CFA1634C38CE9BBF95DDB`
 - 测试设备：Android 15，360 x 792 CSS px，DPR 4，Android System WebView 149
-- 插件源码：`ST-Prompt-Template` 1.17.4.2，基线 `dev-pre-fix@f2acae1`
+- 插件源码：`ST-Prompt-Template` 1.17.4.2，修复提交 `120e541`
 
 原始性能 JSON 包含控件名称、扩展来源和用户文件路径，只保留在本地，不提交仓库。本文仅记录聚合指标和定位所需的源码标识。
 
 本文区分三类结论：
 
 1. **实机证实**：由 optimization-10 性能报告直接支持；
-2. **源码证实**：已从源码和构建产物确认根因，但修复后尚未实机复测；
+2. **源码证实**：已从源码和构建产物确认机制或根因，但尚未建立完整实机对照；
 3. **待验证**：只有趋势或候选解释，不能作为既定事实。
 
 Tauri/Wry 只替换了外壳和后端。SillyTavern 前端、第三方扩展、事件监听器、正则、Markdown、DOM 和状态管理仍运行在 WebView 中，因此“原生客户端”不等于这些工作自动变快。
@@ -25,29 +25,30 @@ Tauri/Wry 只替换了外壳和后端。SillyTavern 前端、第三方扩展、�
 
 ### 2.1 当前判断
 
-1. **TauriTavern 自身的 dry run 并发风暴已经解决。** optimization-10 的 13 次 dry run 实际 generation 区间没有重叠。
-2. **TauriTavern 的世界书 Token 成本已显著下降。** 同为 5,363 条世界书时，dry run Token 平均从 1,295.6 ms 降至 459.8 ms。
-3. **最新实机样本中最严重的可见卡顿来自 `ST-Prompt-Template`。** 该插件占慢监听器聚合时间的 93.9%，发送、请求体准备、输出结束和聊天切换都会被延后约 3 秒。
-4. **插件根因已经从源码确认。** 它在世界书排序的每次比较中重新扫描完整条目数组，使 5,363 条排序访问超过 3 亿个元素。
-5. **插件修复已经完成，但不属于最新实机样本。** 插件提交 `120e541` 将不变量移出比较器；本地新旧排序完全一致，仍需安装修复版后重新采集性能报告。
-6. **排除插件后，TauriTavern 仍有次级热点。** 主要是世界书对象准备与扫描、流式期间持续格式化、约 2.1 万常驻 DOM 节点和重复持久化请求。
+1. **TauriTavern 自身的 dry run 并发风暴已经解决。** optimization-10 的调度仍保持 latest-wins，没有重新出现并发执行证据。
+2. **`ST-Prompt-Template` 的决定性排序问题已通过 Android 实机复测。** `qf/jf/Gf` 关键监听器平均从 3,230.6 ms 降至 134.5 ms，最大值从 3,671.3 ms 降至 193.3 ms。
+3. **插件不再是当前第一性能问题。** 插件全部慢监听器聚合时间从 65.37 s 降至 2.42 s，下降 96.3%；最新样本中已没有稳定的插件级数秒冻结。
+4. **当前第一热点转为 TauriTavern 核心世界书路径。** 5,363 条世界书的 dry run 世界书阶段平均 1.97 s、最大 4.08 s；聊天切换预热监听器最大 1.44 s。
+5. **`JS-Slash-Runner` 是当前最明显的第三方次级热点。** `chat_completion_prompt_ready` 8 次累计 1.87 s、最大 526.4 ms，但自动化命令包含用户等待，不能把嵌套总时长全部解释为 CPU 卡顿。
+6. **流式、DOM/RSS 与持久化仍需继续处理。** 新样本平均约 2.2 万 DOM 节点，流式全量格式化仍是持续功耗来源；发送按钮出现一次 877.8 ms 首帧延迟，按钮 handler 本身接近 0 ms。
 
 ### 2.2 当前严重度排名
 
 | 排名 | 热点 | 状态 | 用户表现 | 最新证据 |
 | ---: | --- | --- | --- | --- |
-| 1（P0） | `ST-Prompt-Template` 世界书排序 | 源码证实，修复待实机复测 | 发送、请求 dispatch、输出结束、聊天切换各卡约 3 秒 | 插件占慢监听器 93.9%；单次最大 3.67 s |
-| 2（P1） | TauriTavern 世界书准备与扫描 | 实机证实 | 大世界书生成前短时卡顿 | 5,363 条时完整阶段平均 1.33 s；扫描平均 455 ms |
-| 3（P1） | 流式全量格式化与 Token 事件 | 实机证实 | 长输出期间持续发热、偶发掉帧 | 5 次生成 16,960 chunks；格式化约 2.80 s，Token 事件约 1.73 s |
-| 4（P1） | 常驻 DOM 与 WebView 内存基线 | 实机证实 | 菜单和抽屉偶发迟钝，长期使用余量不足 | DOM 平均 21,112；RSS 平均 335.1 MiB、峰值 592.6 MiB |
-| 5（P2） | 设置、角色和世界书持久化 | 实机证实，主线程影响未证实 | 打开页面、切换角色或保存额外等待 | settings/get 平均 1.04 s；characters/edit 平均 1.51 s |
-| 6（P2） | 长聊天连续翻页 | 待验证 | 快速滑动时楼层短暂空白 | 小样本重新显示最大 70.6 ms，缺少 200–1,000 楼专项复测 |
+| 1（P0） | TauriTavern 世界书准备、扫描与 Token | 实机证实 | 大世界书生成前冻结，聊天切换变慢 | dry run 平均 1.97 s、最大 4.08 s；切换预热最大 1.44 s |
+| 2（P1） | `JS-Slash-Runner` prompt-ready 自动化 | 实机证实，CPU 归因待拆分 | 发送到请求 dispatch 出现额外等待 | 8 次累计 1.87 s，平均 233.7 ms、最大 526.4 ms |
+| 3（P1） | 流式全量格式化与 Token 事件 | 实机证实 | 长输出期间持续发热、偶发掉帧 | 4 次生成 14,436 chunks；格式化约 1.84 s，Token 事件约 1.48 s |
+| 4（P1） | 常驻 DOM 与 WebView 内存基线 | 实机证实 | 菜单和抽屉偶发迟钝，长期使用余量不足 | DOM 平均 22,122；RSS 平均 357.0 MiB、峰值 573.2 MiB |
+| 5（P2） | `ST-Prompt-Template` 剩余工作 | 实机证实，已非首要问题 | 消息渲染和聊天切换仍有百毫秒成本 | 关键监听器平均 134.5 ms、最大 193.3 ms |
+| 6（P2） | 设置、角色和世界书持久化 | 实机证实，主线程影响未证实 | 打开页面、切换角色或保存额外等待 | 历史样本 settings/get 平均 1.04 s；characters/edit 平均 1.51 s |
+| 7（P2） | 长聊天连续翻页 | 待验证 | 快速滑动时楼层短暂空白 | 最新样本未触发 history prepend，缺少 200–1,000 楼专项复测 |
 
 ## 3. ST-Prompt-Template 根因
 
-### 3.1 实机定位
+### 3.1 修复前实机定位
 
-Schema 9 的稳定监听器身份把压缩函数映射到了 `scripts/extensions/third-party/ST-Prompt-Template/dist/index.js`：
+12:04 修复前样本中，Schema 9 的稳定监听器身份把压缩函数映射到了 `scripts/extensions/third-party/ST-Prompt-Template/dist/index.js`：
 
 | 函数 | 源码处理器 | 事件 | 次数 | 累计耗时 | 平均 | 最大 |
 | --- | --- | --- | ---: | ---: | ---: | ---: |
@@ -59,7 +60,7 @@ Schema 9 的稳定监听器身份把压缩函数映射到了 `scripts/extensions
 
 上述五组累计 64.61 s，占全部慢监听器聚合时间的 92.8%。`ST-Prompt-Template` 所有监听器累计 65.37 s，占 93.9%。
 
-一轮真实生成通常依次经过用户消息 `qf`、请求体准备 `jf` 和 AI 消息 `qf`。按本次样本保守估算，插件给一轮生成增加约 9.5 秒关键路径等待：
+一轮真实生成通常依次经过用户消息 `qf`、请求体准备 `jf` 和 AI 消息 `qf`。按修复前样本保守估算，插件给一轮生成增加约 9.5 秒关键路径等待：
 
 ```text
 点击发送
@@ -110,7 +111,7 @@ function getWorldInfoSorter(entries: WorldInfoEntry[]) {
 - 直接 CPU 根因在插件排序器；
 - 全局并行化 EventEmitter 既不能消除 CPU 工作，又会破坏扩展顺序和最终请求体。
 
-### 3.4 已完成修复
+### 3.4 已完成修复与实机验收
 
 插件分支：`optimization/worldbook-sort`
 
@@ -143,11 +144,27 @@ function getWorldInfoSorter(entries: WorldInfoEntry[]) {
 - 代表性本地基准从 1,224.5 ms 降到 1.4 ms，约 850 倍；
 - `npm run build` 通过，`dist/index.js` 和 source map 已更新。
 
-这些数据证明排序函数本身的等价性和收益，但**不能替代 Android 实机复测**。最新 optimization-10 JSON 采集时仍运行旧插件。
+排序函数的本地等价验证已由最新 Android 实机复测补全。相同设备、相同 5,363 条世界书下，关键监听器变化如下：
+
+| 监听器 | 修复前 | 修复后 | 变化 |
+| --- | ---: | ---: | ---: |
+| `qf` / `character_message_rendered` 平均 | 3,427.3 ms | 172.0 ms | -95.0% |
+| `qf` / `user_message_rendered` 平均 | 3,500.3 ms | 162.0 ms | -95.4% |
+| `jf` / `chat_completion_settings_ready` 平均 | 3,282.0 ms | 103.0 ms | -96.9% |
+| `Gf` / `chat_id_changed` 平均 | 3,150.0 ms | 128.1 ms | -95.9% |
+| `qf/jf/Gf` 关键监听器整体平均 | 3,230.6 ms | 134.5 ms | -95.8% |
+| `qf/jf/Gf` 最大值 | 3,671.3 ms | 193.3 ms | -94.7% |
+| 插件全部慢监听器累计 | 65.37 s | 2.42 s | -96.3% |
+
+聊天切换总耗时也从修复前的平均 4.03 s 降到 1.68 s。该指标还包含核心世界书预热、角色加载和其他扩展，不能把剩余 1.68 s 归给插件。
+
+进程 CPU 平均值从 56.2% 降至 49.6%，但主线程 busy ratio 从 8.5% 升至 9.8%。由于两轮操作与输出不同，这只能说明 CPU 总体方向改善，不能把差值全部归因于插件修复。
+
+结论：`120e541` 已消除插件的灾难级排序成本，`ST-Prompt-Template` 从 P0 根因降为百毫秒级次要成本。性能埋点不记录监听器业务结果，功能等价性仍以排序对照测试和后续请求体快照为准。
 
 ### 3.5 插件修复后的剩余候选
 
-排序修复后若插件仍慢，再按以下顺序处理：
+插件已不再是当前优化重点。只有在核心世界书路径优化后它重新进入前列，才按以下顺序处理：
 
 1. `handleMessageRender()` 每处理一个楼层都会重新加载、克隆、解析并合并全部启用世界书；
 2. `handlePreloadWorldInfo()` 会遍历世界书执行模板，再逐个重新处理可见楼层；
@@ -155,22 +172,22 @@ function getWorldInfoSorter(entries: WorldInfoEntry[]) {
 4. Monaco 编辑器被静态导入，即使 `code_editor=false` 也会加载大型代码编辑模块；
 5. `prepareContext()` 会合并并深拷贝变量，启用自动保存时还会等待聊天保存。
 
-这些路径包含 EJS 副作用、变量修改和请求体变换，风险高于排序修复。必须先用修复后的实机样本确认剩余占比，不能预先缓存或跳过。
+这些路径包含 EJS 副作用、变量修改和请求体变换，风险高于排序修复。只有后续样本证明它们重新成为主要占比时才能处理，不能预先缓存或跳过。
 
 ## 4. TauriTavern 当前热点
 
 ### 4.1 世界书条目准备
 
-`getSortedEntries()` 在 18 次完整调用中的平均成本：
+最新样本的 18 次世界书 trace 中，部分聊天切换预热 trace 没有完整 `entries-total` 汇总，因此分项样本数不同：
 
-| 阶段 | 平均 | 最大 | 18 次累计 |
+| 阶段 | 平均 | 最大 | 累计 / 样本数 |
 | --- | ---: | ---: | ---: |
-| world 数据收集 | 67.4 ms | 101.1 ms | 1.21 s |
-| `WORLDINFO_ENTRIES_LOADED` 监听器 | 22.3 ms | 29.5 ms | 401 ms |
-| 排序 | 1.0 ms | 1.5 ms | 18 ms |
-| decorator 解析、对象构造和 hash | 252.4 ms | 316.8 ms | 4.54 s |
-| 最终 `structuredClone` | 51.0 ms | 87.7 ms | 918 ms |
-| 完整 entries 阶段 | 394.5 ms | 486.7 ms | 7.10 s |
+| world 数据收集 | 72.7 ms | 89.4 ms | 1.31 s / 18 |
+| `WORLDINFO_ENTRIES_LOADED` 监听器 | 71.5 ms | 110.2 ms | 1.29 s / 18 |
+| 排序 | 1.0 ms | 1.7 ms | 17.8 ms / 18 |
+| decorator 解析、对象构造和 hash | 412.2 ms | 537.0 ms | 7.42 s / 18 |
+| 最终 `structuredClone` | 51.0 ms | 63.1 ms | 918 ms / 18 |
+| 完整 entries 阶段 | 608.1 ms | 782.4 ms | 8.51 s / 14 |
 
 TauriTavern 核心的世界书排序只有约 1 ms，**不是** `ST-Prompt-Template` 的排序错误。两者必须分开：
 
@@ -181,14 +198,16 @@ TauriTavern 核心的世界书排序只有约 1 ms，**不是** `ST-Prompt-Templ
 
 ### 4.2 世界书扫描与 Token
 
-optimization-10 的 13 次 dry run 每次均处理 5,363 条世界书：
+最新复测的 9 次完整 dry run（包含导出时的 current record）每次均处理 5,363 条世界书：
 
-- entry scan 平均 455 ms，最大 795.9 ms；
-- Token 平均 459.8 ms，最大 1.81 s；
-- 完整世界书平均 1.33 s，最大 3.02 s；
+- entry scan 平均 540.5 ms，最大 731.1 ms；
+- Token 平均 790.9 ms，最大 2.70 s；
+- 完整世界书平均 1.97 s，最大 4.08 s；
 - 通常递归扫描 3–4 轮。
 
-历史上 Token 是灾难级瓶颈，现在已经降到秒内为主。剩余优化必须保留：
+相比 12:04 样本，dry run 平均值有所回升，但 4 次真实生成的世界书阶段平均 1.25 s，与前次 1.18 s 接近。两轮采集的 Token cache 热度、触发顺序和内容并不相同，因此不能据此认定现有优化回归；最大 2.70 s 表明冷/排队路径仍需进一步拆分。
+
+剩余优化必须保留：
 
 - 激活顺序；
 - 概率和递归；
@@ -201,20 +220,20 @@ optimization-10 的 13 次 dry run 每次均处理 5,363 条世界书：
 
 核心 `scripts/world-info.js` 的 `CHAT_CHANGED` 监听器会调用 `getSortedEntries()` 预热世界书：
 
-- 4 次累计 1.68 s；
-- 最大单次 459.4 ms。
+- 修复前 4 次累计 1.68 s，最大 459.4 ms；
+- 修复后 4 次累计 3.22 s，最大 1.44 s。
 
-该结果随后被丢弃，但调用会填充原始世界书缓存并触发 `WORLDINFO_ENTRIES_LOADED`。不能简单删除或后台化，否则可能改变扩展观察顺序。更合理的后续方向是把“原始 world prefetch”和“生成专用 prepare/hash/clone”拆开，再验证首次生成是否仍完整执行相同事件和结果。
+插件排序修复后，这条核心预热路径已经成为聊天切换的第一热点。该结果随后被丢弃，但调用会填充原始世界书缓存并触发 `WORLDINFO_ENTRIES_LOADED`。不能简单删除或后台化，否则可能改变扩展观察顺序。更合理的后续方向是把“原始 world prefetch”和“生成专用 prepare/hash/clone”拆开，再验证首次生成是否仍完整执行相同事件和结果。
 
 ### 4.4 流式生成
 
-5 次真实生成：
+最新 4 次真实生成：
 
-- 16,960 个 chunks；
-- 约 4,294 次预览处理；
-- 格式化累计约 2.80 s；
-- Token 事件监听累计约 1.73 s；
-- DOM commit 累计约 566 ms。
+- 14,436 个 chunks；
+- 约 3,309 次预览处理；
+- 格式化累计约 1.84 s；
+- Token 事件监听累计约 1.48 s；
+- DOM commit 累计约 480 ms。
 
 移动端限频已经把多个 chunk 合并为一次预览，单次格式化明显变轻。它现在更像持续功耗来源，而不是稳定数秒冻结。
 
@@ -222,12 +241,12 @@ optimization-10 的 13 次 dry run 每次均处理 5,363 条世界书：
 
 ### 4.5 DOM 与内存
 
-- DOM 平均 21,112，P95 21,353；
+- DOM 平均 22,122，P95 22,246，单次峰值 38,142；
 - 同屏消息平均约 10 条；
-- RSS 平均 335.1 MiB，峰值 592.6 MiB；
-- JS heap P95 约 497 MiB。
+- RSS 平均 357.0 MiB，峰值 573.2 MiB；
+- JS heap P95 约 468.3 MiB。
 
-扩展菜单出现一次 688 ms Event Timing，其中 click handler 只有 4.2 ms，presentation delay 为 656.2 ms，更像布局、绘制或同帧任务阻塞。
+发送按钮出现一次 877.8 ms Event Timing，handler 接近 0 ms、首个有效帧为 874.7 ms；扩展菜单最大 651.3 ms，handler 仅 0.1 ms。两者更像布局、绘制或同帧任务阻塞，而不是按钮回调本身缓慢。
 
 单次峰值不能证明内存泄漏。卸载隐藏设置页或扩展 DOM 可能破坏表单状态、同步 DOM 查询和 MutationObserver；必须先补模块级节点归属、detached node 和固定循环后的 idle 回落数据。
 
@@ -279,22 +298,20 @@ optimization-10 的 13 次 dry run 每次均处理 5,363 条世界书：
 
 ## 6. 后续优化计划
 
-### P0：安装插件修复并复测
-
-必须使用与 optimization-10 相同的设备、世界书和插件配置：
-
-1. 安装修复后的 `ST-Prompt-Template`；
-2. 重复至少 5 次发送、生成结束和聊天切换；
-3. 确认 `qf/jf/Gf` 从约 3 秒下降后的真实剩余成本；
-4. 对比最终请求体、世界书激活、消息 HTML 和变量状态；
-5. 记录 CPU、长任务、RSS 和用户可见卡顿。
-
-### P1：收敛 TauriTavern 世界书固定成本
+### P0：收敛 TauriTavern 世界书固定成本
 
 1. 先评估合并 entries prepare 两次 `map()` 的实际收益；
 2. 给聊天切换预热拆分 prefetch、扩展事件、prepare/hash/clone 阶段；
-3. 只有建立完整 revision/失效模型后才考虑 prepared-entry cache；
-4. 用冻结输入双执行比较激活条目、顺序、Token budget 和最终请求体。
+3. 单独记录 Tokenizer 队列等待、native 执行和 exact dedupe 命中，解释 2.70 s 最大值；
+4. 只有建立完整 revision/失效模型后才考虑 prepared-entry cache；
+5. 用冻结输入双执行比较激活条目、顺序、Token budget 和最终请求体。
+
+### P1：拆分 JS-Slash-Runner 自动化等待
+
+1. 区分命令同步 CPU、嵌套命令、UI `buttons` 用户等待和网络等待；
+2. 对 `chat_completion_prompt_ready` 的 8 次调用建立同一自动化 sourceKey 关联；
+3. 不把等待用户选择的 `buttons` 总时长当作主线程 CPU；
+4. 不改变命令顺序、变量可见性和 abort 语义。
 
 ### P1：降低流式稳态 CPU
 
@@ -394,30 +411,34 @@ optimization-10 的 13 次 dry run 每次均处理 5,363 条世界书：
 | 2026-07-12 18:53:40 | 3 | 增加聊天加载、楼层操作和慢监听器 |
 | 2026-07-13 06:41:15 | 4 | 增加运行时、网络和原生健康采样 |
 | 2026-07-13 09:18:01 | 9 | optimization-9 优化前基线 |
-| 2026-07-13 12:04:56 | 9 | optimization-10 最新复测 |
+| 2026-07-13 12:04:56 | 9 | optimization-10、插件修复前基线 |
+| 2026-07-13 15:03:56 | 9 | `ST-Prompt-Template` 修复后复测 |
 
 optimization-9 样本 SHA-256：`6BB9093AA27964B4FBE0315B88A9F31835AD63E569B66C63D20C8F75FDA989FC`。
 
+插件修复前样本 SHA-256：`42FE59A5E04C9AFE8C96030AF36401EE57F97CA87E2CC0FB899599F56EB70142`。
+
 ### 10.2 最新样本覆盖
 
-- 采集持续 21.77 分钟；
-- 13 次 dry run；
-- 5 次真实生成；
+- 采集持续 15.33 分钟；
+- 9 次完整 dry run，其中 1 次位于导出时的 current record；
+- 4 次真实生成；
 - 4 次聊天切换；
-- 900 个健康样本；
-- 132 个慢监听器观测，保留最近 100 条明细；
+- 881 个健康样本；
+- 143 个慢监听器观测，保留最近 100 条明细；
 - 5,363 条世界书；
-- Android 前台可见样本 892 个，后台样本 8 个。
+- Android 前台可见样本 876 个，后台样本 5 个。
 
 ### 10.3 限制
 
-1. optimization-9 与 optimization-10 的操作序列、输出内容和采集时长不完全一致；
+1. 各轮采集的操作序列、输出内容、Token cache 热度和采集时长不完全一致；
 2. `superseded` 记录的生命周期不能当作 dry run 实际执行耗时，应使用 generation trace；
 3. 慢监听器累计时间可能包含父监听器等待嵌套命令，不能当作独立 CPU time 相加；
 4. 当前设备未暴露电池温度、电流和电压；
 5. RSS 峰值不能单独证明内存泄漏；
-6. 最新样本没有覆盖大型聊天快速连续翻页；
-7. `ST-Prompt-Template` 修复后的性能尚未进入任何实机 JSON。
+6. 最新样本没有触发 history prepend，也没有覆盖大型聊天快速连续翻页；
+7. Slash Command 的 `buttons`、嵌套 `run/if` 会包含用户等待，自动化累计时长不能直接当作 CPU time；
+8. 插件排序结果已通过本地等价测试，但最新样本没有保存最终请求体快照，不能仅凭性能报告完成端到端功能等价证明。
 
 ## 11. 埋点缺口
 
@@ -435,8 +456,9 @@ Schema 9 已覆盖 generation、世界书、流式、聊天加载、交互、网
 ## 12. 最终结论
 
 - TauriTavern 的 dry run 并发和世界书 Token 风暴已经得到数量级改善；
-- 最新实机样本中的第一性能问题是 `ST-Prompt-Template`，其决定性根因是比较器内重复全数组扫描；
-- 插件的等价修复已经完成，但必须通过 Android 实机复测后才能确认端到端收益；
-- 排除插件后，TauriTavern 的主要工作是世界书对象准备/扫描、流式稳态 CPU 和 DOM/RSS 基线；
+- `ST-Prompt-Template` 的比较器全数组重复扫描已经修复并通过 Android 复测，关键监听器平均下降 95.8%；
+- 当前第一性能问题转为 TauriTavern 核心世界书对象准备、扫描、Token 和聊天切换预热；
+- `JS-Slash-Runner` 是当前最明显的第三方次级热点，但必须先剥离用户等待再决定是否优化；
+- 流式稳态 CPU 和 DOM/RSS 基线仍会造成发热与按钮 presentation delay；
 - settings 和持久化是次级异步成本，不能用有状态风险的 TTL 缓存草率处理；
 - 后续优化必须以最终请求体、世界书激活、消息 HTML、变量状态、事件顺序和 viewport 等价为前提。
