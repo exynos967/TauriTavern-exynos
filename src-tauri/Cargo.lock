@@ -6773,6 +6773,7 @@ dependencies = [
  "filetime",
  "futures-util",
  "image 0.24.9",
+ "libc",
  "mime_guess",
  "objc2",
  "objc2-foundation",

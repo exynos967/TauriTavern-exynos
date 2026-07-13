@@ -8,6 +8,7 @@ pub struct PerfRuntimeSample {
     sampled_at_unix_ms: u128,
     process_cpu_ticks: Option<u64>,
     system_cpu_ticks: Option<u64>,
+    clock_ticks_per_second: Option<u64>,
     logical_cpu_count: usize,
     resident_memory_bytes: Option<u64>,
     battery_temperature_c: Option<f64>,
@@ -75,6 +76,18 @@ fn normalize_battery_temperature(raw: f64) -> f64 {
     }
 }
 
+#[cfg(unix)]
+fn clock_ticks_per_second() -> Option<u64> {
+    // SAFETY: sysconf only reads the process-wide clock tick configuration.
+    let ticks = unsafe { libc::sysconf(libc::_SC_CLK_TCK) };
+    u64::try_from(ticks).ok().filter(|value| *value > 0)
+}
+
+#[cfg(not(unix))]
+fn clock_ticks_per_second() -> Option<u64> {
+    None
+}
+
 fn sample_runtime() -> PerfRuntimeSample {
     let sampled_at_unix_ms = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -97,6 +110,7 @@ fn sample_runtime() -> PerfRuntimeSample {
         sampled_at_unix_ms,
         process_cpu_ticks,
         system_cpu_ticks,
+        clock_ticks_per_second: clock_ticks_per_second(),
         logical_cpu_count: std::thread::available_parallelism()
             .map(usize::from)
             .unwrap_or(1),

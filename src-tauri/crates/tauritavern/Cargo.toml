@@ -35,6 +35,7 @@ tokio-util = { version = "0.7", default-features = false, features = ["io", "rt"
 futures-util = "0.3"
 reqwest = { workspace = true, features = ["http2", "json", "rustls", "socks", "stream"] }
 bytes = "1"
+libc = "0.2"
 async-compression = { version = "0.4", features = ["tokio", "zstd"] }
 base64 = "0.22"
 rand = { workspace = true }

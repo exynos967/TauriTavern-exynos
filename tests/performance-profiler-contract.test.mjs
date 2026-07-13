@@ -62,6 +62,8 @@ test('performance profiler captures interaction latency and heat signals only wh
     assert.match(diagnosticsSource, /addEventListener\('click', onClick, true\)/);
     assert.match(diagnosticsSource, /removeEventListener\('click', onClick, true\)/);
     assert.match(diagnosticsSource, /mainThreadBusyRatio/);
+    assert.match(diagnosticsSource, /computeProcessCpuPercent/);
+    assert.match(diagnosticsSource, /clockTicksPerSecond/);
     assert.match(diagnosticsSource, /networkInFlightMax/);
     assert.match(diagnosticsSource, /restoreFetch\(\)/);
     assert.match(diagnosticsSource, /installInvokeProfiler\(\)/);

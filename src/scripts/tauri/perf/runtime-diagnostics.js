@@ -65,6 +65,27 @@ function readRuntimeSample() {
     };
 }
 
+export function computeProcessCpuPercent(sample, previous) {
+    const processDelta = Number(sample?.processCpuTicks) - Number(previous?.processCpuTicks);
+    if (!(processDelta >= 0)) {
+        return null;
+    }
+
+    const systemDelta = Number(sample?.systemCpuTicks) - Number(previous?.systemCpuTicks);
+    const cores = Number(sample?.logicalCpuCount);
+    if (systemDelta > 0 && cores > 0) {
+        return round((processDelta / systemDelta) * cores * 100);
+    }
+
+    const wallDeltaMs = Number(sample?.sampledAtUnixMs) - Number(previous?.sampledAtUnixMs);
+    const clockTicksPerSecond = Number(sample?.clockTicksPerSecond);
+    if (!(wallDeltaMs > 0) || !(clockTicksPerSecond > 0)) {
+        return null;
+    }
+
+    return round((processDelta / clockTicksPerSecond) / (wallDeltaMs / 1000) * 100);
+}
+
 export function createRuntimeDiagnostics({ nativeSampler } = {}) {
     const state = {
         running: false,
@@ -125,15 +146,7 @@ export function createRuntimeDiagnostics({ nativeSampler } = {}) {
     }
 
     function computeNativeCpuPercent(sample) {
-        const previous = state.nativeSample;
-        const processDelta = Number(sample?.processCpuTicks) - Number(previous?.processCpuTicks);
-        const systemDelta = Number(sample?.systemCpuTicks) - Number(previous?.systemCpuTicks);
-        const cores = Number(sample?.logicalCpuCount);
-        if (!(processDelta >= 0) || !(systemDelta > 0) || !(cores > 0)) {
-            return null;
-        }
-
-        return round((processDelta / systemDelta) * cores * 100);
+        return computeProcessCpuPercent(sample, state.nativeSample);
     }
 
     async function sampleNativeRuntime() {
