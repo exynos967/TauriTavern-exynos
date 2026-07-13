@@ -3,7 +3,7 @@
 ## 1. 文档状态
 
 - 分析日期：2026-07-13
-- 当前分支：`optimization/worldbook-streaming`
+- 当前分支：`optimization/performance`
 - 当前分析提交：`104c5a7b`（optimization-10）
 - 最新采样构建：TauriTavern 2.1.1 `arm64-v8a` optimization-10 Perf Release
 - 主要测试设备：Android 15，360 x 792 CSS px，DPR 4，Android System WebView 149
