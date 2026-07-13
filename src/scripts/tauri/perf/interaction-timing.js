@@ -5,16 +5,20 @@ function round(value) {
     return Number.isFinite(number) ? Math.round(number * 10) / 10 : null;
 }
 
-function describeTarget(target) {
+export function describeInteractionTarget(target) {
     if (typeof Element !== 'function' || !(target instanceof Element)) {
         return null;
     }
 
+    const interactive = target.closest?.('button, a, input, select, textarea, [role="button"], [tabindex]') ?? target;
     return {
-        tag: target.tagName.toLowerCase(),
-        id: target.id || null,
-        classes: Array.from(target.classList).slice(0, 4),
-        name: target.getAttribute('aria-label') || target.getAttribute('title') || null,
+        tag: interactive.tagName.toLowerCase(),
+        id: interactive.id || null,
+        classes: Array.from(interactive.classList).slice(0, 4),
+        name: interactive.getAttribute('aria-label')
+            || interactive.getAttribute('title')
+            || interactive.getAttribute('name')
+            || null,
     };
 }
 
@@ -36,6 +40,6 @@ export function serializeSlowInteraction(entry, thresholdMs = DEFAULT_SLOW_INTER
         processingMs: round(Math.max(0, processingEnd - processingStart)),
         presentationDelayMs: round(Math.max(0, startTime + durationMs - processingEnd)),
         interactionId: Number(entry.interactionId) || null,
-        target: describeTarget(entry.target),
+        target: describeInteractionTarget(entry.target),
     };
 }

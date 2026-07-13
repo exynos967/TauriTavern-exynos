@@ -110,6 +110,7 @@ pub fn invoke_handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Sen
         super::bootstrap_commands::get_bootstrap_snapshot,
         super::bootstrap_commands::backend_error_bridge_ready,
         super::bootstrap_commands::wait_for_backend_ready,
+        super::perf_commands::get_perf_runtime_sample,
         // Settings commands
         super::settings_commands::get_tauritavern_settings,
         super::settings_commands::update_tauritavern_settings,

@@ -1,5 +1,7 @@
 import { eventSource, event_types } from '../../../script.js';
+import { invoke, isTauri } from '../../../tauri-bridge.js';
 import { serializeSlowInteraction } from '../../tauri/perf/interaction-timing.js';
+import { createRuntimeDiagnostics } from '../../tauri/perf/runtime-diagnostics.js';
 
 const GLOBAL_KEY = '__TAURITAVERN_PERF_PROFILER__';
 const MAX_RECORDS = 20;
@@ -9,6 +11,10 @@ const MAX_SLOW_INTERACTIONS = 100;
 const MAX_OPERATIONS = 100;
 const MAX_SLOW_LISTENERS = 100;
 const SLOW_LISTENER_THRESHOLD_MS = 8;
+
+const runtimeDiagnostics = createRuntimeDiagnostics({
+    nativeSampler: isTauri() ? () => invoke('get_perf_runtime_sample') : undefined,
+});
 
 const state = {
     capturing: false,
@@ -379,6 +385,7 @@ function startCapture() {
     installInteractionObserver();
     installEventListenerProfiler();
     startFrameSampler();
+    runtimeDiagnostics.start();
     renderStatus();
 }
 
@@ -390,12 +397,13 @@ function stopCapture() {
     finalizeRecord('capture-stopped');
     state.capturing = false;
     delete globalThis.__TAURITAVERN_PERF_EVENT_LISTENER__;
+    runtimeDiagnostics.stop();
     renderStatus();
 }
 
 function snapshot() {
     return {
-        schemaVersion: 3,
+        schemaVersion: 4,
         exportedAt: new Date().toISOString(),
         userAgent: navigator.userAgent,
         viewport: {
@@ -409,6 +417,7 @@ function snapshot() {
         slowInteractions: structuredClone(state.slowInteractions),
         operations: structuredClone(state.operations),
         slowListeners: structuredClone(state.slowListeners),
+        diagnostics: runtimeDiagnostics.snapshot(),
     };
 }
 
@@ -433,8 +442,15 @@ function renderStatus() {
 
     state.toggleButton.classList.toggle('is-capturing', state.capturing);
     const record = state.current ?? state.records.at(-1);
+    const diagnostics = runtimeDiagnostics.summary();
     if (!record) {
-        state.status.textContent = state.capturing ? '等待下一次生成…' : '采集已停止';
+        const lastHealth = diagnostics.lastHealthSample;
+        const lastClick = diagnostics.lastInteraction;
+        state.status.innerHTML = `
+            <div>${state.capturing ? '正在采集，等待操作…' : '采集已停止'}</div>
+            <div>点击可见：${formatMs(lastClick?.totalMs)} · 主线程忙：${Number.isFinite(lastHealth?.mainThreadBusyRatio) ? `${Math.round(lastHealth.mainThreadBusyRatio * 100)}%` : '-'}</div>
+            <div>网络：${diagnostics.networkInFlight} 并发 / 峰值 ${diagnostics.networkInFlightMax} · Invoke：${diagnostics.invokeInFlight} / 峰值 ${diagnostics.invokeInFlightMax}</div>
+        `;
         return;
     }
 
@@ -444,6 +460,8 @@ function renderStatus() {
     const generationPhases = record.generation.trace?.phases ?? {};
     const lastChatLoad = state.chatLoads.at(-1);
     const lastOperation = state.operations.at(-1);
+    const lastHealth = diagnostics.lastHealthSample;
+    const lastClick = diagnostics.lastInteraction;
     state.status.innerHTML = `
         <div><b>${state.current ? '正在生成' : '最近一次'}</b> #${record.id} · ${record.type}</div>
         <div>总耗时：${formatMs(duration)}</div>
@@ -453,6 +471,9 @@ function renderStatus() {
         <div>首块：${formatMs(record.stream.firstChunkAtMs)} · 流块：${record.stream.chunks}</div>
         <div>Prompt：${formatMs(generationPhases['prompt-assembly']?.durationMs)} · 请求：${formatMs(generationPhases['request-dispatch']?.durationMs ?? generationPhases['request-response']?.durationMs)}</div>
         <div>聊天载入：${formatMs(lastChatLoad?.durationMs)} · 慢交互：${state.slowInteractions.length}</div>
+        <div>点击可见：${formatMs(lastClick?.totalMs)} · 主线程忙：${Number.isFinite(lastHealth?.mainThreadBusyRatio) ? `${Math.round(lastHealth.mainThreadBusyRatio * 100)}%` : '-'}</div>
+        <div>网络：${diagnostics.networkInFlight} 并发 / 峰值 ${diagnostics.networkInFlightMax} · Invoke：${diagnostics.invokeInFlight} / 峰值 ${diagnostics.invokeInFlightMax}</div>
+        <div>CPU：${Number.isFinite(lastHealth?.native?.processCpuPercent) ? `${lastHealth.native.processCpuPercent}%` : '-'} · 温度：${Number.isFinite(lastHealth?.native?.batteryTemperatureC) ? `${lastHealth.native.batteryTemperatureC} °C` : '-'}</div>
         <div>最近操作：${lastOperation?.name ?? '-'} / ${formatMs(lastOperation?.durationMs)} · 慢监听：${state.slowListeners.length}</div>
         <div>长任务：${record.responsiveness.longTasks} 次 / ${formatMs(record.responsiveness.maxLongTaskMs)}</div>
     `;
@@ -505,6 +526,7 @@ function createUi() {
         state.slowInteractions = [];
         state.operations = [];
         state.slowListeners = [];
+        runtimeDiagnostics.clear();
         renderStatus();
     });
 
