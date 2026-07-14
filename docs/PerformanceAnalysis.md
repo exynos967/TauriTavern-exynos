@@ -5,6 +5,7 @@
 - 分析日期：2026-07-14
 - TauriTavern 分支：`optimization/performance`
 - 埋点基线分支：`perf`
+- 当前运行时代码：`558f4278`（聊天预热裁剪、流式 no-op DOM commit 去重）
 - 最新实测运行时代码：`b8ca3364`（OpenAI prefix tokenizer 增量计数）
 - 最新实测构建：TauriTavern 2.1.1 `arm64-v8a` token-optimized Perf Release
 - 最新性能样本：`tauritavern-perf-2026-07-13T18-24-53.017Z.json`
@@ -31,13 +32,14 @@ Tauri/Wry 只替换了外壳和后端。SillyTavern 前端、事件监听器、�
 2. **OpenAI 世界书 prefix Token 重复扫描已得到实机确认改善。** prefix native 调用平均从 124.2 ms 降至 26.1 ms，P95 从 540 ms 降至 49 ms；高 Token 调用任务的 Token 阶段平均下降 57.7%。
 3. **世界书条目准备已完成第一轮低风险收敛。** 5,363 条场景的 prepare 平均从 413.5 ms 降至最新样本的 200.6 ms，下降 51.5%；完整 entries 阶段平均降至 334.0 ms。
 4. **长聊天渲染、滚动所有权和发送/生成结束 viewport 已做结构性修复。** 自动化契约测试已覆盖楼层顺序、批次边界和 scroll lock；最新样本没有触发 history prepend，仍缺少 200–1,000 楼实机压力复测。
-5. **当前第一持续功耗热点是流式格式化与 Token 事件。** 新样本两次真实生成持续 183.3 s 和 280.5 s，累计处理 10,179 次 Token 事件和 2,713 次格式化更新；DOM/RSS、聊天切换和持久化仍是次级问题。
+5. **聊天切换不再执行结果被丢弃的世界书排序、prepare 和 clone。** 原始 world prefetch、四类 lore 收集、`WORLDINFO_ENTRIES_LOADED` 事件及 await 顺序保持不变；按旧 trace 可消除平均约 239 ms 的无用阶段，待新 APK 实测。
+6. **当前第一持续功耗热点仍是流式格式化与 Token 事件。** 流式路径已对严格相同 HTML 跳过 no-op DOM 写入，但动态正则、Markdown、sanitize、逐 Token 事件、fade-in 和最终提交保持原路径；实际收益待新 APK 量化。
 
 ### 2.2 当前严重度排名
 
 | 排名 | 热点 | 状态 | 用户表现 | 最新证据 |
 | ---: | --- | --- | --- | --- |
-| 1（P0） | 流式全量格式化与 Token 事件 | 实机证实 | 长输出期间持续发热、偶发掉帧 | 2 次生成 10,179 次 Token 事件、2,713 次格式化；生成窗口 CPU 平均 46.4% |
+| 1（P0） | 流式全量格式化与 Token 事件 | 已追加低风险优化，待复测 | 长输出期间持续发热、偶发掉帧 | no-op DOM commit 已去重；Markdown、sanitize 和 Token 事件仍完整执行 |
 | 2（P1） | 世界书扫描与剩余固定成本 | 实机证实，已显著改善 | 大世界书生成前仍有短暂停顿 | 高 Token 调用任务世界书平均 1.46 s、最大 1.68 s；entries 平均 334.0 ms |
 | 3（P1） | 常驻 DOM 与 WebView 内存基线 | 实机证实 | 菜单和抽屉偶发迟钝，长期使用余量不足 | DOM 平均 22,452；RSS 平均 477.8 MiB、峰值 643.3 MiB |
 | 4（P2） | 设置、角色和世界书持久化 | 实机证实，主线程影响未证实 | 打开页面、切换角色或保存额外等待 | 历史样本 settings/get 平均 1.04 s；characters/edit 平均 1.51 s |
@@ -105,7 +107,7 @@ Schema 10 Android 实机复测进一步确认了收益：
 
 核心 `scripts/world-info.js` 的 `CHAT_CHANGED` 监听器会调用 `getSortedEntries()` 预热世界书。最新样本 3 次累计 1.55 s、最大 998.3 ms，其中同步执行仅累计 3.9 ms，约 1.55 s 来自等待异步流程。
 
-这条预热路径仍是聊天切换的主要等待项。其结果随后被丢弃，但调用会填充原始世界书缓存并触发 `WORLDINFO_ENTRIES_LOADED`。不能简单删除或后台化，否则可能改变事件观察顺序。更合理的后续方向是把“原始 world prefetch”和“生成专用 prepare/hash/clone”拆开，再验证首次生成是否仍完整执行相同事件和结果。
+提交 `98945c45` 已把聊天切换预热裁剪为“原始 world prefetch + 四类 lore 收集 + `WORLDINFO_ENTRIES_LOADED` 事件”。事件载荷、串行 await 和异常隔离保持原样；只有返回值无人使用的排序、decorator/hash 和最终 clone 被跳过。按上一份 5,363 条 trace，这三段平均约 239 ms。正常生成仍通过 `getSortedEntries()` 执行完整流程；该收益尚需新 APK 实测。
 
 ### 3.4 流式生成
 
@@ -118,6 +120,8 @@ Schema 10 Android 实机复测进一步确认了收益：
 - 生成窗口 CPU 平均 46.4%，主线程 busy ratio 平均 14.3%。
 
 移动端限频已经把多个 chunk 合并为一次预览，单次格式化明显变轻。它现在更像持续功耗来源，而不是稳定数秒冻结。
+
+提交 `558f4278` 继续消除严格相同 HTML 的 no-op DOM commit。为保持行为等价，动态正则、宏、Markdown 和 sanitize 仍会完整计算；fade-in 模式和最终态无条件提交，普通模式也会比较实际 DOM，外部修改不会被内部缓存掩盖。该改动主要减少 DOM、样式和绘制工作，不应预期等比例降低格式化 CPU。
 
 低风险候选：流式统计只维护首时间、末时间和计数，不再保存每个 chunk 的 timestamp。高风险候选包括增量 Markdown/sanitize、跳过 `STREAM_TOKEN_RECEIVED` 或强制覆盖用户 FPS，暂不实施。
 
@@ -158,6 +162,8 @@ Schema 10 Android 实机复测进一步确认了收益：
 | Prompt Manager latest-wins | dry run 实际执行区间重叠降为 0 | 消除重叠执行 | 实机证实 |
 | 长聊天分批渲染与滚动控制 | 楼层顺序、批次边界、scroll lock 和 viewport 契约通过 | 行为保持 | 契约验证，缺专项实机压力复测 |
 | 移动端流式预览限频 | 最终完整渲染和策略测试通过 | 降低预览刷新次数 | 契约验证；尚无独立开关 A/B |
+| 聊天切换预热裁剪 | 保留 prefetch、lore 收集和 loaded 事件，跳过丢弃的 sort/prepare/clone | 旧 trace 平均可少约 239 ms 无用阶段 | 契约验证，待 Android 实测 |
+| 流式 no-op DOM commit | 相同 HTML 不重复写入；fade-in 和最终态强制提交 | 减少无效 DOM、样式和绘制工作 | 契约验证，待 Android 实测 |
 
 不同报告的采集时长、操作、输出内容和 Token cache 热度并不完全一致。CPU、RSS 和真实生成总时长只作为方向性证据；同为 5,363 条的阶段耗时、tokenizer 调用分布和契约测试更适合判断单项收益。
 
@@ -173,6 +179,8 @@ Schema 10 Android 实机复测进一步确认了收益：
 | 流式预览 | `2363ea41` | 移动端限制中间预览刷新频率 | 不跳过 Token 事件，最终消息完整格式化 |
 | 长聊天 | `c9d427c6` | 楼层分批渲染并让出主线程 | 楼层 ID、顺序和 windowed payload 不变 |
 | viewport | `7558fdd5`、`dae0540b` | 统一滚动所有权，发送、生成结束和 prepend 保留用户位置 | 尊重 scroll lock，不改变显式滚动命令 |
+| 聊天切换 | `98945c45` | 预热阶段不再计算无人使用的 sorted/prepared entries | prefetch、事件载荷、await 顺序和完整生成路径不变 |
+| 流式 DOM | `558f4278` | 跳过严格相同 HTML 的 no-op DOM commit | 完整格式化、fade-in、最终态和外部 DOM 修正保持原路径 |
 
 动态宏、概率、timed effects、宿主事件、世界书激活顺序和最终请求体仍由每次真正执行的完整流程计算。
 
@@ -192,7 +200,7 @@ Schema 10 Android 实机复测进一步确认了收益：
 ### P1：继续收敛世界书固定成本
 
 1. prefix tokenizer 已完成 Schema 10 实机复测，不再优先修改其算法；
-2. 给聊天切换预热拆分 prefetch、宿主事件、prepare/hash/clone 阶段；
+2. 聊天切换预热裁剪已完成，先实机复测再决定是否继续处理；
 3. 只有建立完整 revision/失效模型后才考虑 prepared-entry cache；
 4. 用冻结输入双执行比较激活条目、顺序、Token budget 和最终请求体。
 
@@ -336,6 +344,8 @@ tokenizer 优化后样本 SHA-256：`D4984BA278E60212F6FC8AE7CB52FDEC06CA43FDC04
 - 世界书 entries prepare 已完成单遍历优化，Android 实机平均下降 51.5%；
 - OpenAI prefix tokenizer 的重复扫描已通过 Schema 10 Android 实机复测，高 Token 调用任务的 Token 阶段平均下降 57.7%，旧有 0.5–0.7 s 单次尖峰未再出现；
 - 长聊天分批渲染、集中滚动所有权和 viewport 保持已经落地并通过契约测试，但仍缺少大聊天实机压力复测；
+- 聊天切换预热已跳过无人使用的 sort/prepare/clone，按旧 trace 可减少平均约 239 ms 无用阶段，待 Android 实测；
+- 流式严格相同 HTML 的 no-op DOM commit 已去重，完整格式化、fade-in 和最终态保持不变，待 Android 实测；
 - 当前第一持续功耗问题是流式格式化和 Token 事件；DOM/RSS 基线仍会造成发热与按钮 presentation delay；
 - settings 和持久化是次级异步成本，不能用有状态风险的 TTL 缓存草率处理；
 - 后续优化必须以最终请求体、世界书激活、消息 HTML、变量状态、事件顺序和 viewport 等价为前提。
@@ -351,11 +361,12 @@ tokenizer 优化后样本 SHA-256：`D4984BA278E60212F6FC8AE7CB52FDEC06CA43FDC04
 | 世界书 Token 预算 | 原始 token-count 单次 85.31–217.02 s，占世界书耗时约 99% | 最新样本平均 227.1 ms、最大 776.9 ms；高调用任务平均 662.7 ms | 保守下降至少 99.1%；高调用任务相对优化前一轮再下降 57.7% | 已从分钟级降到亚秒级，是本轮最大收益 |
 | OpenAI prefix tokenizer | native 平均 124.2 ms、P95 540 ms、最大 735 ms | 平均 26.1 ms、P95 49 ms、最大 73 ms | 平均下降 79.0%，P95 下降 90.9%，最大值下降 90.1% | 重复扫描根因已解决，broker queue 已不是瓶颈 |
 | 世界书 entries prepare | 5,363 条平均 413.5 ms | 平均 200.6 ms、最大 225.8 ms | 平均下降 51.5% | 第一轮低风险分配优化完成；hash、clone 仍有剩余成本 |
-| 移动端流式预览 | chunk 到达期间频繁处理不断增长的完整输出 | 10,179 次 Token 事件对应 2,713 次格式化，格式化次数相当于事件数的 26.7% | 相对“一事件一次格式化”减少约 73.3% 次刷新；缺少限频开关前后同输出 A/B，不能给出总 CPU 降幅 | 部分解决；仍是当前第一持续功耗热点 |
+| 移动端流式预览 | chunk 到达期间频繁处理不断增长的完整输出 | 10,179 次 Token 事件对应 2,713 次格式化；当前代码另跳过严格相同 HTML 的 no-op DOM commit | 相对“一事件一次格式化”减少约 73.3% 次刷新；DOM 去重收益待复测，不能给出总 CPU 降幅 | 部分解决；仍是当前第一持续功耗热点 |
+| 聊天切换预热 | 为预取世界书执行完整 sort、prepare 和 clone，最终结果被丢弃 | 只保留 prefetch、lore 收集和 loaded 事件 | 按旧 trace 消除平均约 239 ms 无用阶段 | 机制已解决，待 Android 实测确认端到端收益 |
 | 长聊天楼层渲染 | 历史楼层一次性插入，快速翻页时主线程长时间无法呈现新楼层 | 改为小批次插入并在批次间让出主线程，分页 IPC、batch render 和锚点已有埋点 | 已消除一次性大批渲染机制；性能百分比尚无实机证据 | 机制已优化，仍需 200/500/1,000 楼连续翻页复测 |
 | 发送、结束输出和滚动 | 多条路径可各自强制滚动，出现跳到顶部或抢占用户 viewport | 滚动所有权集中管理，发送、生成结束和 prepend 尊重 scroll lock 并保留 viewport | 两个已知跳转触发场景已处理；该项是行为正确性修复，不适合换算性能百分比 | 契约测试通过，需继续做长聊天回归 |
 | DOM 与 WebView 内存 | 少量消息时仍常驻约 2.1 万 DOM 节点，RSS 约 375–532 MiB | DOM 平均 22,452，RSS 平均 477.8 MiB、峰值 643.3 MiB | 没有证据表明本轮降低了基线 | 尚未解决，必须先补模块归属和循环回落数据 |
 | 设置与持久化 | settings/get、patch 和 character edit 存在秒级异步等待 | 本轮未修改有状态缓存和保存顺序 | 0 个已证实的性能问题被本轮直接消除 | 尚未优化，维持低优先级以避免 revision 和保存语义风险 |
 | 普通按钮 presentation delay | 偶发点击后数百毫秒才出现有效帧 | 最新慢交互仍有 224 ms 样本，且没有保留到新的 `send_but` 慢样本 | 没有可靠前后 A/B | 尚未解决；需结合 DOM 所有权和同帧长任务定位 |
 
-总体上，本轮已经解决了最严重的三类结构性问题：世界书分钟级 Token 风暴、Prompt Manager 重叠 dry run，以及长聊天一次性渲染/多点滚动竞争。当前剩余工作不再是同一数量级：首要问题已经转为长时间流式生成的持续 CPU，随后是 DOM/RSS 基线、聊天切换预热和有状态持久化等待。
+总体上，本轮已经解决了最严重的三类结构性问题：世界书分钟级 Token 风暴、Prompt Manager 重叠 dry run，以及长聊天一次性渲染/多点滚动竞争。聊天切换无用准备和流式 no-op DOM commit 也已完成低风险裁剪，但尚待新 APK 量化。当前首要问题仍是长时间流式生成的持续 CPU，随后是 DOM/RSS 基线和有状态持久化等待。
