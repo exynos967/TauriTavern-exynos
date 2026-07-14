@@ -1482,6 +1482,9 @@ function applyTheme(name) {
         if (theme[key] !== undefined) {
             const oldValue = power_user[key];
             const newValue = theme[key];
+            if (Object.is(oldValue, newValue)) {
+                continue;
+            }
             power_user[key] = newValue;
             if (selector) $(selector).attr('color', newValue);
             if (type) applyThemeColor(type);
