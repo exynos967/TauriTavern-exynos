@@ -5,8 +5,8 @@
 - 分析日期：2026-07-14
 - TauriTavern 分支：`optimization/performance`
 - 埋点基线分支：`perf`
-- 当前运行时代码：`d0226330`（聊天预热裁剪、流式 no-op DOM commit 去重、主题 unchanged-field 去重）
-- 最新实测运行时代码：`d0226330`（聊天预热裁剪、流式 no-op DOM commit 去重、主题 unchanged-field 去重）
+- 当前运行时代码：`558f4278`（含聊天预热裁剪与流式 no-op DOM commit 去重；主题 unchanged-field 去重已回退）
+- 最新实测运行时代码：`d0226330`（该实测构建仍包含随后回退的主题 unchanged-field guard）
 - 最新实测构建：TauriTavern 2.1.1 `arm64-v8a` optimization-11 Perf Release
 - 最新性能样本：`tauritavern-perf-2026-07-14T06-16-12.117Z.json`
 - 样本 SHA-256：`95350A45E63FA20BD08779A1D6CE004D9F94F40E97BE04380A94AD7A10679FDE`
@@ -169,7 +169,6 @@ optimization-11 的 2 次真实生成持续 120.6 s 和 148.3 s，共输出 4,92
 | 移动端流式预览限频 | 最终完整渲染和策略测试通过 | 降低预览刷新次数 | 契约验证；尚无独立开关 A/B |
 | 聊天切换预热裁剪 | 保留 prefetch、lore 收集和 loaded 事件，跳过丢弃的 sort/prepare/clone | listeners 平均 812.1 -> 601.3 ms（-26.0%）；端到端平均 -4.2% | 实机方向性证据 |
 | 流式 no-op DOM commit | 相同 HTML 不重复写入；fade-in 和最终态强制提交 | 543 / 1,641 次更新跳过 DOM 写入；每千字符 DOM 耗时 -54.0% | 实机证实 |
-| 主题 unchanged-field 去重 | 主题字段值未变化时跳过对应 CSS、DOM 和 action 重放 | 减少重复主题应用工作 | 契约验证，待 Android 实测 |
 
 不同报告的采集时长、操作、输出内容和 Token cache 热度并不完全一致。CPU、RSS 和真实生成总时长只作为方向性证据；同为 5,363 条的阶段耗时、tokenizer 调用分布和契约测试更适合判断单项收益。
 
@@ -187,9 +186,10 @@ optimization-11 的 2 次真实生成持续 120.6 s 和 148.3 s，共输出 4,92
 | viewport | `7558fdd5`、`dae0540b` | 统一滚动所有权，发送、生成结束和 prepend 保留用户位置 | 尊重 scroll lock，不改变显式滚动命令 |
 | 聊天切换 | `98945c45` | 预热阶段不再计算无人使用的 sorted/prepared entries | prefetch、事件载荷、await 顺序和完整生成路径不变 |
 | 流式 DOM | `558f4278` | 跳过严格相同 HTML 的 no-op DOM commit | 完整格式化、fade-in、最终态和外部 DOM 修正保持原路径 |
-| 主题切换 | `d0226330` | 跳过值未变化字段的 CSS、DOM 和 action 重放 | 冷启动仍通过 `applyPowerUserSettings()` 强制应用完整视觉状态 |
 
 动态宏、概率、timed effects、宿主事件、世界书激活顺序和最终请求体仍由每次真正执行的完整流程计算。
+
+主题 unchanged-field guard 已回退：显式应用主题时恢复原有字段赋值及 CSS、DOM、action 重放。该 guard 只影响低频主题切换，没有专项实机收益证据，却可能削弱“重复应用同一主题以重新同步视觉状态”的原有语义，因此不继续保留。
 
 ### 4.3 性能监视器覆盖
 
@@ -312,7 +312,7 @@ optimization-11 的 2 次真实生成持续 120.6 s 和 148.3 s，共输出 4,92
 | 2026-07-13 15:03:56 | 9 | 世界书与流式复测 |
 | 2026-07-13 17:12:14 | 10 | prefix tokenizer 优化前 native 调用基线 |
 | 2026-07-13 18:24:53 | 10 | prefix tokenizer 优化后 Android 实机复测 |
-| 2026-07-14 06:16:12 | 10 | 聊天预热、流式 DOM 与主题优化后的 optimization-11 实机复测 |
+| 2026-07-14 06:16:12 | 10 | 聊天预热与流式 DOM 优化后的 optimization-11 实机复测；构建中主题 guard 随后已回退 |
 
 optimization-9 样本 SHA-256：`6BB9093AA27964B4FBE0315B88A9F31835AD63E569B66C63D20C8F75FDA989FC`。
 
@@ -364,7 +364,6 @@ optimization-11 样本 SHA-256：`95350A45E63FA20BD08779A1D6CE004D9F94F40E97BE04
 - 长聊天分批渲染、集中滚动所有权和 viewport 保持已经落地并通过契约测试，但仍缺少大聊天实机压力复测；
 - 聊天切换预热已跳过无人使用的 sort/prepare/clone，optimization-11 中 listeners 平均下降 26.0%，但端到端聊天加载只下降 4.2%；
 - 流式严格相同 HTML 的 no-op DOM commit 已去重，实机跳过 33.1% DOM 写入；相近输出规模下每千字符格式化和 DOM commit 耗时分别下降 49.7% 和 54.0%；
-- 手动主题应用已跳过值未变化字段的 CSS、DOM 和 action 重放，冷启动强制应用路径不变，待 Android 实测；
 - 当前最严重问题依次是：生成期间持续进程 CPU 与偶发 451–615 ms 长任务、按钮/菜单事件链和 presentation delay、约一秒的聊天加载与消息重绘；
 - 流式主线程 busy ratio 已下降 55.6%，原“流式全量格式化/DOM 重复提交”不再是唯一 P0 根因；剩余 CPU 必须补线程归因和 profiler A/B 后再优化；
 - 世界书 5,363 条真实生成已稳定在约 0.8–1.0 s，仍可感知但已降为次级问题；DOM/RSS 基线仍会放大布局、绘制和长期运行压力；
@@ -373,7 +372,7 @@ optimization-11 样本 SHA-256：`95350A45E63FA20BD08779A1D6CE004D9F94F40E97BE04
 
 ## 12. 相对原始 TauriTavern 的优化收益
 
-本节的“原始 TauriTavern”指本轮优化开始前、已接入只读监视器的 Schema 1–3 运行时；“当前版本”指 `d0226330` 的 optimization-11 Schema 10 Android 实测。两者设备和世界书规模接近，但操作序列、激活内容和 cache 热度不完全相同，因此只有同口径 A/B 使用精确百分比，跨报告结果使用保守下界。
+本节的“原始 TauriTavern”指本轮优化开始前、已接入只读监视器的 Schema 1–3 运行时；“当前实测版本”指 `d0226330` 的 optimization-11 Schema 10 Android 构建。该构建包含的主题 guard 随后已回退，但本节引用的生成、聊天和世界书数据不依赖主题切换。两者设备和世界书规模接近，但操作序列、激活内容和 cache 热度不完全相同，因此只有同口径 A/B 使用精确百分比，跨报告结果使用保守下界。
 
 | 区域 | 原始表现 | 当前表现 | 已解决多少 | 当前判断 |
 | --- | --- | --- | --- | --- |
@@ -389,6 +388,5 @@ optimization-11 样本 SHA-256：`95350A45E63FA20BD08779A1D6CE004D9F94F40E97BE04
 | DOM 与 WebView 内存 | 少量消息时仍常驻约 2.1 万 DOM 节点，RSS 约 375–532 MiB | DOM 平均 22,384，RSS 平均约 449.8 MiB、峰值约 601.9 MiB | 没有证据表明本轮降低了基线 | 尚未解决，必须先补模块归属和循环回落数据 |
 | 设置与持久化 | settings/get、patch 和 character edit 存在秒级异步等待 | 本轮未修改有状态缓存和保存顺序 | 0 个已证实的性能问题被本轮直接消除 | 尚未优化，维持低优先级以避免 revision 和保存语义风险 |
 | 普通按钮 presentation delay | 偶发点击后数百毫秒才出现有效帧 | 扩展菜单点击链 732 ms、事件派发延迟峰值 960.2 ms、`pointerleave` 最大 304 ms | 没有可靠前后 A/B | 当前第二严重问题；需关联同帧长任务、监听器、布局和绘制 |
-| 主题切换 | 所有主题字段都会重放 CSS、DOM 和 action，即使值未变化 | unchanged 字段已直接跳过；首次启动仍强制应用完整视觉状态 | 已消除 unchanged 字段对应的重复工作；总耗时待实机量化 | 低风险优化已完成，需补主题切换专项 trace |
 
 总体上，本轮已经解决了最严重的三类结构性问题：世界书分钟级 Token 风暴、Prompt Manager 重叠 dry run，以及长聊天一次性渲染/多点滚动竞争。聊天切换无用准备和流式 no-op DOM commit 也已获得 optimization-11 实机证据。当前最严重的剩余问题是生成期间持续进程 CPU 与偶发超长任务，其次是按钮/菜单有效帧延迟和约一秒的聊天加载；世界书固定成本、DOM/RSS 基线和持久化等待已经降为后续分项。
