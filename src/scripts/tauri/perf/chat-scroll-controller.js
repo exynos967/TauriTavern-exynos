@@ -31,28 +31,11 @@ export function createChatScrollController({
     cancelFrame,
     canAutoScroll = () => true,
     bottomThreshold = DEFAULT_BOTTOM_THRESHOLD,
-    trace = () => {},
 }) {
     let generationDepth = 0;
     let generationFollowsOutput = true;
     let pendingGenerationFollowsOutput = null;
     let pendingFrame = null;
-    let lastViewportReport = null;
-
-    const report = (event, detail = {}) => {
-        try {
-            trace({
-                event,
-                generationDepth,
-                generationFollowsOutput,
-                hasPendingGenerationIntent: typeof pendingGenerationFollowsOutput === 'boolean',
-                hasPendingFrame: pendingFrame !== null,
-                ...detail,
-            });
-        } catch {
-            // Diagnostics must never affect chat scrolling.
-        }
-    };
 
     const cancelPending = () => {
         if (pendingFrame === null) {
@@ -60,7 +43,6 @@ export function createChatScrollController({
         }
         cancelFrame(pendingFrame);
         pendingFrame = null;
-        report('pending-cancelled');
     };
 
     const isAtBottom = () => isChatViewportAtBottom(readViewport(), bottomThreshold);
@@ -68,12 +50,10 @@ export function createChatScrollController({
     return Object.freeze({
         captureGenerationIntent() {
             pendingGenerationFollowsOutput = isAtBottom();
-            report('generation-intent-captured', { atBottom: pendingGenerationFollowsOutput });
             return pendingGenerationFollowsOutput;
         },
         clearGenerationIntent() {
             pendingGenerationFollowsOutput = null;
-            report('generation-intent-cleared');
         },
         beginGeneration() {
             if (generationDepth === 0) {
@@ -86,70 +66,37 @@ export function createChatScrollController({
                 }
             }
             generationDepth += 1;
-            lastViewportReport = null;
-            report('generation-began');
         },
         endGeneration() {
             generationDepth = Math.max(0, generationDepth - 1);
-            report('generation-ended');
         },
         onViewportChanged({ userInitiated = true } = {}) {
             const atBottom = isAtBottom();
-            const normalizedUserInitiated = Boolean(userInitiated);
             if (generationDepth === 0) {
                 generationFollowsOutput = atBottom;
-            } else if (!atBottom && normalizedUserInitiated) {
+            } else if (!atBottom && userInitiated) {
                 generationFollowsOutput = false;
                 cancelPending();
             }
-            const viewportState = {
-                atBottom,
-                userInitiated: normalizedUserInitiated,
-                generationFollowsOutput,
-            };
-            if (!lastViewportReport
-                || lastViewportReport.atBottom !== viewportState.atBottom
-                || lastViewportReport.userInitiated !== viewportState.userInitiated
-                || lastViewportReport.generationFollowsOutput !== viewportState.generationFollowsOutput) {
-                report('viewport-changed', viewportState);
-                lastViewportReport = viewportState;
-            }
         },
         requestScroll({ waitForFrame = false, force = false } = {}) {
-            const autoScrollEnabled = canAutoScroll();
-            if (!autoScrollEnabled || (!force && !generationFollowsOutput)) {
+            if (!canAutoScroll() || (!force && !generationFollowsOutput)) {
                 cancelPending();
-                report('scroll-rejected', {
-                    autoScrollEnabled,
-                    force: Boolean(force),
-                    waitForFrame: Boolean(waitForFrame),
-                });
                 return false;
             }
 
             cancelPending();
             if (!waitForFrame) {
-                report('scroll-executing', { force: Boolean(force), waitForFrame: false });
                 scrollToBottom();
-                report('scroll-executed', { force: Boolean(force), waitForFrame: false });
                 return true;
             }
 
             pendingFrame = requestFrame(() => {
                 pendingFrame = null;
-                const frameAutoScrollEnabled = canAutoScroll();
-                if (frameAutoScrollEnabled && (force || generationFollowsOutput)) {
-                    report('scroll-executing', { force: Boolean(force), waitForFrame: true });
+                if (canAutoScroll() && (force || generationFollowsOutput)) {
                     scrollToBottom();
-                    report('scroll-executed', { force: Boolean(force), waitForFrame: true });
-                } else {
-                    report('scroll-frame-rejected', {
-                        autoScrollEnabled: frameAutoScrollEnabled,
-                        force: Boolean(force),
-                    });
                 }
             });
-            report('scroll-scheduled', { force: Boolean(force), waitForFrame: true });
             return true;
         },
         cancelPending,

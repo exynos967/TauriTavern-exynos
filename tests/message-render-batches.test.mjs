@@ -28,11 +28,10 @@ test('message insertion and generation delegate scrolling to one controller', as
     assert.match(source, /finally \{\s*chatScrollController\.clearGenerationIntent\(\);\s*showSwipeButtons\(\)/);
     assert.match(source, /async function GenerateInternal\([^]*chatScrollController\.beginGeneration\(\)/);
     assert.match(source, /finally \{\s*chatScrollController\.endGeneration\(\)/);
-    assert.match(source, /const userInitiated = chatScrollIntent\.isActive\(\)/);
-    assert.match(source, /chatScrollController\.onViewportChanged\(\{ userInitiated \}\)/);
-    assert.match(source, /if \(scrollIsAtBottom\) \{\s*chatScrollIntent\.clear\(\);\s*lastChatScrollIntentSource = null;\s*\}/);
-    assert.match(source, /chatElementScroll\.addEventListener\('wheel', \(\) => markChatScrollIntent\('wheel'\)/);
-    assert.match(source, /chatElementScroll\.addEventListener\('touchmove', \(\) => markChatScrollIntent\('touchmove'\)/);
+    assert.match(source, /chatScrollController\.onViewportChanged\(\{ userInitiated: chatScrollIntent\.isActive\(\) \}\)/);
+    assert.match(source, /if \(scrollIsAtBottom\) \{\s*chatScrollIntent\.clear\(\);\s*\}/);
+    assert.match(source, /chatElementScroll\.addEventListener\('wheel', markChatScrollIntent/);
+    assert.match(source, /chatElementScroll\.addEventListener\('touchmove', markChatScrollIntent/);
     assert.match(source, /chatElementScroll\.addEventListener\('pointermove', event =>/);
     assert.match(source, /chatScrollController\.requestScroll\(\{ waitForFrame, force \}\)/);
     assert.match(source, /let position = chatElement\[0\]\.scrollHeight;\s*if \(power_user\.waifuMode\) \{\s*const lastMessage = chatElement\.find\('\.mes'\)\.last\(\);/);
