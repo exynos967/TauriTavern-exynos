@@ -238,3 +238,15 @@ test('controller trace failures do not affect scroll decisions', () => {
     assert.equal(harness.scrolls, 1);
     harness.controller.endGeneration();
 });
+
+test('controller trace coalesces unchanged viewport events', () => {
+    const events = [];
+    const harness = createHarness(undefined, { trace: sample => events.push(sample) });
+
+    harness.controller.beginGeneration();
+    harness.controller.onViewportChanged({ userInitiated: false });
+    harness.controller.onViewportChanged({ userInitiated: false });
+    harness.controller.onViewportChanged({ userInitiated: false });
+
+    assert.equal(events.filter(sample => sample.event === 'viewport-changed').length, 1);
+});

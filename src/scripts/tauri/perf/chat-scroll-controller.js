@@ -37,6 +37,7 @@ export function createChatScrollController({
     let generationFollowsOutput = true;
     let pendingGenerationFollowsOutput = null;
     let pendingFrame = null;
+    let lastViewportReport = null;
 
     const report = (event, detail = {}) => {
         try {
@@ -85,6 +86,7 @@ export function createChatScrollController({
                 }
             }
             generationDepth += 1;
+            lastViewportReport = null;
             report('generation-began');
         },
         endGeneration() {
@@ -93,13 +95,25 @@ export function createChatScrollController({
         },
         onViewportChanged({ userInitiated = true } = {}) {
             const atBottom = isAtBottom();
+            const normalizedUserInitiated = Boolean(userInitiated);
             if (generationDepth === 0) {
                 generationFollowsOutput = atBottom;
-            } else if (!atBottom && userInitiated) {
+            } else if (!atBottom && normalizedUserInitiated) {
                 generationFollowsOutput = false;
                 cancelPending();
             }
-            report('viewport-changed', { atBottom, userInitiated: Boolean(userInitiated) });
+            const viewportState = {
+                atBottom,
+                userInitiated: normalizedUserInitiated,
+                generationFollowsOutput,
+            };
+            if (!lastViewportReport
+                || lastViewportReport.atBottom !== viewportState.atBottom
+                || lastViewportReport.userInitiated !== viewportState.userInitiated
+                || lastViewportReport.generationFollowsOutput !== viewportState.generationFollowsOutput) {
+                report('viewport-changed', viewportState);
+                lastViewportReport = viewportState;
+            }
         },
         requestScroll({ waitForFrame = false, force = false } = {}) {
             const autoScrollEnabled = canAutoScroll();

@@ -20,7 +20,7 @@ Schema 11 reports additionally include:
 - Per-batch history prepend timing: message range/count, render/DOM/scroll-anchor cost, height change, and frame-yield status.
 - Runtime interaction, network, event-loop, DOM, resident-memory, and process CPU samples. Android process CPU falls back to process ticks plus wall time when access to global `/proc/stat` is restricted.
 - Tokenizer invoke outcomes, concurrency-queue wait, and native transport duration without request DTOs, model names, text, messages, or dedupe keys.
-- Chat scroll attribution for the `#chat` instance: direct `scrollTop` writes, `scrollTo()` calls, controller decisions, scroll-event intent, and coalesced DOM geometry changes. Samples contain numeric viewport geometry and sanitized call stacks only.
+- Chat scroll attribution for the `#chat` instance: direct `scrollTop` writes, `scrollTo()` calls, direct DOM rebuild operations, controller decisions, scroll-event intent, and coalesced DOM geometry changes. Samples contain numeric viewport geometry, bounded node metadata, content lengths, and sanitized call stacks only.
 
 ## Privacy and overhead
 
@@ -28,7 +28,7 @@ Schema 11 reports additionally include:
 - Quick Reply set/source identities are deterministic non-plaintext hashes for local correlation, not cryptographic anonymization. Request records contain method, origin category, and path without query strings or bodies.
 - Source attribution strips desktop workspace prefixes and keeps repository-relative module paths where possible. Registration stacks are captured only for generation, message, chat, world-info, streaming, settings, and extension-startup events; other events retain low-cost registration metadata.
 - Expensive runtime hooks, per-render phase snapshots, automation timing, history batch timing, and Tokenizer invoke timing are inactive while capture is stopped. Event registration metadata is recorded once when a listener is registered so Release builds can be attributed later.
-- Listener, automation, formatting, history, chat-scroll, network, invoke, interaction, and health collections are bounded. Reports include observed/stored/dropped counts where truncation is relevant.
+- Listener, automation, formatting, history, chat-scroll, network, invoke, interaction, and health collections are bounded. Chat-scroll reports keep a separate bounded `criticalSamples` collection so direct writes, DOM rebuilds, lifecycle decisions, and large geometry jumps survive high-frequency streaming. Reports include observed/stored/dropped counts where truncation is relevant.
 
 When TauriTavern's optional core tracing is available, reports also include:
 

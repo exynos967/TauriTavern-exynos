@@ -16,7 +16,7 @@ import { getCodeHighlightCoordinator } from './scripts/tauri/perf/code-highlight
 import { isInlineDrawerContentOpen, setInlineDrawerContentOpen } from './scripts/tauri/perf/inline-drawer-motion.js';
 import { createPerformanceTrace } from './scripts/tauri/perf/performance-trace.js';
 import { createChatScrollController, createChatScrollIntentTracker } from './scripts/tauri/perf/chat-scroll-controller.js';
-import { installChatScrollTrace, readChatScrollGeometry, reportChatScrollSample } from './scripts/tauri/perf/chat-scroll-trace.js';
+import { installChatScrollTrace, isSignificantChatScrollChange, readChatScrollGeometry, reportChatScrollSample } from './scripts/tauri/perf/chat-scroll-trace.js';
 import { getMessageRenderBatches } from './scripts/tauri/perf/message-render-batches.js';
 import { getHistoryPrependProfiler, reportHistoryPrependBatch } from './scripts/tauri/perf/history-prepend-profiler.js';
 import { getStreamingRenderInterval, shouldCommitStreamingMessage } from './scripts/tauri/perf/streaming-render-policy.js';
@@ -13194,6 +13194,8 @@ jQuery(async function () {
     const chatElementScroll = document.getElementById('chat');
     installChatScrollTrace(chatElementScroll);
     let lastChatScrollIntentSource = null;
+    let lastReportedChatScrollGeometry = readChatScrollGeometry(chatElementScroll);
+    let lastReportedChatScrollUserInitiated = false;
     const markChatScrollIntent = source => {
         lastChatScrollIntentSource = source;
         chatScrollIntent.mark();
@@ -13223,11 +13225,14 @@ jQuery(async function () {
             scrollLock = true;
         }
         const userInitiated = chatScrollIntent.isActive();
-        reportChatScrollSample('scroll-event', {
-            source: userInitiated ? lastChatScrollIntentSource : 'programmatic-or-layout',
-            userInitiated,
-            geometry: readChatScrollGeometry(chatElementScroll),
-        });
+        const source = userInitiated ? lastChatScrollIntentSource : 'programmatic-or-layout';
+        const geometry = readChatScrollGeometry(chatElementScroll);
+        if (isSignificantChatScrollChange(lastReportedChatScrollGeometry, geometry)
+            || userInitiated !== lastReportedChatScrollUserInitiated) {
+            reportChatScrollSample('scroll-event', { source, userInitiated, geometry });
+            lastReportedChatScrollGeometry = geometry;
+            lastReportedChatScrollUserInitiated = userInitiated;
+        }
         chatScrollController.onViewportChanged({ userInitiated });
         if (scrollIsAtBottom) {
             chatScrollIntent.clear();

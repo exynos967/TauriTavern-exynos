@@ -31,7 +31,10 @@ test('performance report exports generic operations and slow event listeners', a
     assert.match(source, /chatScrollProfiler:\s*getChatScrollProfilerSnapshot\(\)/);
     assert.match(source, /__TAURITAVERN_PERF_CHAT_SCROLL__/);
     assert.match(source, /MAX_CHAT_SCROLL_SAMPLES/);
+    assert.match(source, /MAX_CHAT_SCROLL_CRITICAL_SAMPLES/);
     assert.match(source, /chatScrollDropped \+= pushBounded/);
+    assert.match(source, /criticalSamples:\s*structuredClone\(state\.chatScrollCriticalSamples\)/);
+    assert.match(source, /isCriticalChatScrollSample/);
     assert.match(source, /context:\s*getCurrentCaptureContext\(\)/);
     assert.match(source, /stack\.slice\(0, 8\)/);
     const chatScrollSanitizer = source.slice(
@@ -132,6 +135,10 @@ test('chat scroll diagnostics observe only the chat instance and controller deci
     assert.match(scriptSource, /trace:\s*sample => reportChatScrollSample\('controller', sample\)/);
     assert.match(traceSource, /Object\.defineProperty\(element, 'scrollTop'/);
     assert.match(traceSource, /Object\.defineProperty\(element, 'scrollTo'/);
+    assert.match(traceSource, /installMethodTrace\('appendChild'\)|\['appendChild',/);
+    assert.match(traceSource, /\['textContent', 'innerHTML'\]/);
+    assert.match(traceSource, /isSignificantChatScrollChange/);
     assert.doesNotMatch(traceSource, /prototype\.scrollTop|Element\.prototype|HTMLElement\.prototype/);
-    assert.doesNotMatch(traceSource, /textContent|innerHTML|outerHTML/);
+    assert.match(traceSource, /valueLength:\s*typeof value === 'string' \? value\.length : null/);
+    assert.doesNotMatch(traceSource, /dom-content-write'[\s\S]{0,300}\bvalue,\s*$/m);
 });

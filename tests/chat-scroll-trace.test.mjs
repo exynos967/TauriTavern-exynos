@@ -3,6 +3,7 @@ import test from 'node:test';
 
 import {
     installChatScrollTrace,
+    isSignificantChatScrollChange,
     reportChatScrollSample,
     sanitizeChatScrollStack,
 } from '../src/scripts/tauri/perf/chat-scroll-trace.js';
@@ -20,7 +21,25 @@ function createElement() {
             scrollTop = typeof first === 'object' ? Number(first.top) : Number(second);
             return 'native-result';
         },
+        appendChild(node) {
+            this.childElementCount += 1;
+            this.scrollHeight += 100;
+            return node;
+        },
     };
+    let textContent = 'existing';
+    Object.defineProperty(prototype, 'textContent', {
+        configurable: true,
+        get() {
+            return textContent;
+        },
+        set(value) {
+            textContent = String(value);
+            this.childElementCount = 0;
+            this.scrollHeight = this.clientHeight;
+            scrollTop = 0;
+        },
+    });
     const element = Object.create(prototype);
     Object.assign(element, {
         scrollHeight: 1000,
@@ -99,15 +118,53 @@ test('mutation geometry samples are coalesced and contain no DOM content', () =>
     });
 
     element.scrollHeight = 1200;
-    observerCallback();
-    observerCallback();
+    const addedNode = { nodeType: 1, tagName: 'DIV', id: 'message-22', className: 'mes last_mes', childElementCount: 3 };
+    observerCallback([{ target: element, addedNodes: [addedNode], removedNodes: [] }]);
+    observerCallback([{ target: addedNode, addedNodes: [], removedNodes: [] }]);
     assert.equal(frames.length, 1);
     frames[0]();
 
     assert.equal(samples.length, 1);
     assert.equal(samples[0].kind, 'dom-geometry-change');
     assert.equal(samples[0].geometry.scrollHeight, 1200);
+    assert.equal(samples[0].mutation.records, 2);
+    assert.equal(samples[0].mutation.directRecords, 1);
+    assert.deepEqual(samples[0].mutation.addedNodes[0].classNames, ['mes', 'last_mes']);
     assert.equal(JSON.stringify(samples[0]).includes('textContent'), false);
+});
+
+test('chat trace captures direct DOM rebuild operations without recording content', () => {
+    const samples = [];
+    const element = createElement();
+    installChatScrollTrace(element, {
+        report: (kind, detail) => {
+            samples.push({ kind, ...detail });
+            return true;
+        },
+        isEnabled: () => true,
+        createStack: () => 'Error\n at render (https://example.test/src/script.js:100:2)',
+        MutationObserverClass: undefined,
+    });
+
+    const node = { nodeType: 1, tagName: 'DIV', id: 'message-22', className: 'mes last_mes', childElementCount: 2 };
+    assert.equal(element.appendChild(node), node);
+    element.textContent = 'private chat content';
+
+    const beforeSamples = samples.filter(sample => sample.phase === 'before');
+    assert.deepEqual(beforeSamples.map(sample => [sample.kind, sample.operation]), [
+        ['dom-method-call', 'appendChild'],
+        ['dom-content-write', 'textContent'],
+    ]);
+    assert.equal(beforeSamples[0].node.id, 'message-22');
+    assert.equal(beforeSamples[1].valueLength, 20);
+    assert.equal(JSON.stringify(samples).includes('private chat content'), false);
+});
+
+test('geometry filter keeps child changes and large jumps while dropping token-sized shifts', () => {
+    const baseline = { scrollTop: 1000, scrollHeight: 1600, clientHeight: 600, atBottom: true, messageCount: 20 };
+    assert.equal(isSignificantChatScrollChange(baseline, { ...baseline, scrollTop: 1010, scrollHeight: 1610 }), false);
+    assert.equal(isSignificantChatScrollChange(baseline, { ...baseline, scrollTop: 0, atBottom: false }), true);
+    assert.equal(isSignificantChatScrollChange(baseline, { ...baseline, messageCount: 21 }), true);
 });
 
 test('stack sanitizer removes origin, query, hash and bounds frames', () => {

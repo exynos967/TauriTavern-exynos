@@ -18,7 +18,8 @@ const MAX_UNATTRIBUTED_TRACES = 50;
 const MAX_AUTOMATION_SAMPLES = 300;
 const MAX_STREAM_FORMAT_SAMPLES = 300;
 const MAX_HISTORY_PREPEND_SAMPLES = 200;
-const MAX_CHAT_SCROLL_SAMPLES = 600;
+const MAX_CHAT_SCROLL_SAMPLES = 1200;
+const MAX_CHAT_SCROLL_CRITICAL_SAMPLES = 600;
 const MAX_TOKEN_INVOKE_SAMPLES = 300;
 const MAX_SLOW_LISTENERS = 100;
 const MAX_LONG_TASK_SAMPLES = 300;
@@ -53,6 +54,9 @@ const state = {
     chatScrollSamples: [],
     chatScrollObserved: 0,
     chatScrollDropped: 0,
+    chatScrollCriticalSamples: [],
+    chatScrollCriticalObserved: 0,
+    chatScrollCriticalDropped: 0,
     tokenInvokeSamples: [],
     tokenInvokeObserved: 0,
     tokenInvokeDropped: 0,
@@ -662,6 +666,41 @@ function sanitizeChatScrollGeometry(geometry) {
     };
 }
 
+function sanitizeChatScrollNode(node) {
+    if (!node || typeof node !== 'object') {
+        return null;
+    }
+
+    return {
+        nodeType: Number.isFinite(Number(node.nodeType)) ? Number(node.nodeType) : null,
+        tagName: node.tagName ? String(node.tagName).slice(0, 64) : null,
+        id: node.id ? String(node.id).slice(0, 96) : null,
+        classNames: Array.isArray(node.classNames)
+            ? node.classNames.slice(0, 6).map(value => String(value).slice(0, 96))
+            : [],
+        childElementCount: Number.isFinite(Number(node.childElementCount)) ? Number(node.childElementCount) : null,
+    };
+}
+
+function sanitizeChatScrollMutation(mutation) {
+    if (!mutation || typeof mutation !== 'object') {
+        return null;
+    }
+
+    return {
+        records: Number.isFinite(Number(mutation.records)) ? Number(mutation.records) : 0,
+        directRecords: Number.isFinite(Number(mutation.directRecords)) ? Number(mutation.directRecords) : 0,
+        added: Number.isFinite(Number(mutation.added)) ? Number(mutation.added) : 0,
+        removed: Number.isFinite(Number(mutation.removed)) ? Number(mutation.removed) : 0,
+        addedNodes: Array.isArray(mutation.addedNodes)
+            ? mutation.addedNodes.slice(0, 6).map(sanitizeChatScrollNode)
+            : [],
+        removedNodes: Array.isArray(mutation.removedNodes)
+            ? mutation.removedNodes.slice(0, 6).map(sanitizeChatScrollNode)
+            : [],
+    };
+}
+
 function sanitizeChatScrollSample(sample) {
     const request = sample.request && typeof sample.request === 'object' ? {
         left: finiteRound(sample.request.left),
@@ -677,8 +716,13 @@ function sanitizeChatScrollSample(sample) {
         event: sample.event ? String(sample.event).slice(0, 64) : null,
         phase: sample.phase ? String(sample.phase).slice(0, 32) : null,
         source: sample.source ? String(sample.source).slice(0, 64) : null,
+        operation: sample.operation ? String(sample.operation).slice(0, 64) : null,
+        valueLength: Number.isFinite(Number(sample.valueLength)) ? Number(sample.valueLength) : null,
         requestedTop: finiteRound(sample.requestedTop),
         request,
+        node: sanitizeChatScrollNode(sample.node),
+        referenceNode: sanitizeChatScrollNode(sample.referenceNode),
+        mutation: sanitizeChatScrollMutation(sample.mutation),
         before: sanitizeChatScrollGeometry(sample.before),
         previousGeometry: sanitizeChatScrollGeometry(sample.previousGeometry),
         geometry: sanitizeChatScrollGeometry(sample.geometry),
@@ -697,15 +741,42 @@ function sanitizeChatScrollSample(sample) {
     };
 }
 
+function isCriticalChatScrollSample(sample) {
+    if (['scrollTop-write', 'scrollTo-call', 'dom-method-call', 'dom-content-write'].includes(sample.kind)) {
+        return true;
+    }
+    if (sample.kind === 'controller' && sample.event !== 'viewport-changed') {
+        return true;
+    }
+
+    const previous = sample.previousGeometry ?? sample.before;
+    const current = sample.geometry;
+    return Boolean(previous && current && (
+        previous.messageCount !== current.messageCount
+        || previous.atBottom !== current.atBottom
+        || Math.abs(Number(current.scrollTop) - Number(previous.scrollTop)) >= 80
+        || Math.abs(Number(current.scrollHeight) - Number(previous.scrollHeight)) >= 80
+    ));
+}
+
 function installChatScrollProfiler() {
     globalThis.__TAURITAVERN_PERF_CHAT_SCROLL__ = sample => measureProfilerWork(() => {
         if (state.capturing && sample && typeof sample === 'object') {
             state.chatScrollObserved += 1;
+            const sanitized = sanitizeChatScrollSample(sample);
             state.chatScrollDropped += pushBounded(
                 state.chatScrollSamples,
-                sanitizeChatScrollSample(sample),
+                sanitized,
                 MAX_CHAT_SCROLL_SAMPLES,
             );
+            if (isCriticalChatScrollSample(sanitized)) {
+                state.chatScrollCriticalObserved += 1;
+                state.chatScrollCriticalDropped += pushBounded(
+                    state.chatScrollCriticalSamples,
+                    sanitized,
+                    MAX_CHAT_SCROLL_CRITICAL_SAMPLES,
+                );
+            }
         }
     });
 }
@@ -716,6 +787,10 @@ function getChatScrollProfilerSnapshot() {
         stored: state.chatScrollSamples.length,
         dropped: state.chatScrollDropped,
         samples: structuredClone(state.chatScrollSamples),
+        criticalObserved: state.chatScrollCriticalObserved,
+        criticalStored: state.chatScrollCriticalSamples.length,
+        criticalDropped: state.chatScrollCriticalDropped,
+        criticalSamples: structuredClone(state.chatScrollCriticalSamples),
     };
 }
 
@@ -1013,6 +1088,9 @@ function createUi() {
         state.chatScrollSamples = [];
         state.chatScrollObserved = 0;
         state.chatScrollDropped = 0;
+        state.chatScrollCriticalSamples = [];
+        state.chatScrollCriticalObserved = 0;
+        state.chatScrollCriticalDropped = 0;
         state.tokenInvokeSamples = [];
         state.tokenInvokeObserved = 0;
         state.tokenInvokeDropped = 0;
