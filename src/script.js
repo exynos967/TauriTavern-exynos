@@ -9083,28 +9083,33 @@ function applyCharacterChatPayload(data, allowNewChat) {
 }
 
 async function getChatResult({ allowNewChat = false } = {}, perfTrace = null) {
-    name2 = characters[this_chid].name;
-    let freshChat = false;
-    if (allowNewChat && chat.length === 0) {
-        const message = getFirstMessage();
-        if (message.mes) {
-            chat.push(message);
-            freshChat = true;
+    const freshChat = await perfTrace.measureAsync('chat-state-prepare', async () => {
+        name2 = characters[this_chid].name;
+        let created = false;
+        if (allowNewChat && chat.length === 0) {
+            const message = getFirstMessage();
+            if (message.mes) {
+                chat.push(message);
+                created = true;
+            }
+            // Make sure the chat appears on the server
+            await saveChatConditional();
         }
-        // Make sure the chat appears on the server
-        await saveChatConditional();
-    }
+        return created;
+    });
     await perfTrace.measureAsync('itemized-prompts-load', () => loadItemizedPrompts(getCurrentChatId()));
     await perfTrace.measureAsync('messages-render', () => printMessages());
-    select_selected_character(this_chid);
+    perfTrace.measure('selection-sync', () => select_selected_character(this_chid));
 
     await perfTrace.measureAsync('chat-changed-listeners', () => eventSource.emit(event_types.CHAT_CHANGED, (getCurrentChatId())));
-    if (freshChat) await eventSource.emit(event_types.CHAT_CREATED);
+    if (freshChat) await perfTrace.measureAsync('chat-created-listeners', () => eventSource.emit(event_types.CHAT_CREATED));
 
     if (chat.length === 1) {
         const chat_id = (chat.length - 1);
-        await eventSource.emit(event_types.MESSAGE_RECEIVED, chat_id, 'first_message');
-        await eventSource.emit(event_types.CHARACTER_MESSAGE_RENDERED, chat_id, 'first_message');
+        await perfTrace.measureAsync('first-message-listeners', async () => {
+            await eventSource.emit(event_types.MESSAGE_RECEIVED, chat_id, 'first_message');
+            await eventSource.emit(event_types.CHARACTER_MESSAGE_RENDERED, chat_id, 'first_message');
+        });
     }
 }
 

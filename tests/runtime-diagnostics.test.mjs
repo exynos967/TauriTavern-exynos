@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { computeProcessCpuPercent } from '../src/scripts/tauri/perf/runtime-diagnostics.js';
+import { computeProcessCpuPercent, computeThreadCpuSamples } from '../src/scripts/tauri/perf/runtime-diagnostics.js';
 
 test('runtime diagnostics computes CPU percent from system ticks when available', () => {
     assert.equal(computeProcessCpuPercent(
@@ -32,4 +32,30 @@ test('runtime diagnostics leaves CPU percent unavailable without a valid clock',
         { processCpuTicks: 120, systemCpuTicks: null, sampledAtUnixMs: 2000 },
         { processCpuTicks: 100, systemCpuTicks: null, sampledAtUnixMs: 1000 },
     ), null);
+});
+
+test('runtime diagnostics computes per-thread CPU without mixing reused thread ids', () => {
+    const previous = {
+        sampledAtUnixMs: 1000,
+        systemCpuTicks: null,
+        clockTicksPerSecond: 100,
+        threads: [
+            { tid: 10, name: 'main', cpuTicks: 100 },
+            { tid: 11, name: 'old-worker', cpuTicks: 50 },
+        ],
+    };
+    const current = {
+        sampledAtUnixMs: 6000,
+        systemCpuTicks: null,
+        clockTicksPerSecond: 100,
+        threads: [
+            { tid: 10, name: 'main', cpuTicks: 250 },
+            { tid: 11, name: 'new-worker', cpuTicks: 80 },
+        ],
+    };
+
+    assert.deepEqual(computeThreadCpuSamples(current, previous), [
+        { tid: 10, name: 'main', cpuTicks: 250, cpuPercent: 30 },
+        { tid: 11, name: 'new-worker', cpuTicks: 80, cpuPercent: null },
+    ]);
 });

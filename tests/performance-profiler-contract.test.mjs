@@ -9,7 +9,7 @@ const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..
 test('performance report exports generic operations and slow event listeners', async () => {
     const source = await readFile(path.join(REPO_ROOT, 'src/scripts/extensions/tauritavern-perf-profiler/index.js'), 'utf8');
 
-    assert.match(source, /schemaVersion:\s*10/);
+    assert.match(source, /schemaVersion:\s*11/);
     assert.match(source, /operations:\s*structuredClone\(state\.operations\)/);
     assert.match(source, /slowListeners:\s*structuredClone\(state\.slowListeners\)/);
     assert.match(source, /diagnostics:\s*runtimeDiagnostics\.snapshot\(\)/);
@@ -28,6 +28,9 @@ test('performance report exports generic operations and slow event listeners', a
     assert.match(source, /historyPrependProfiler:\s*getHistoryPrependProfilerSnapshot\(\)/);
     assert.match(source, /__TAURITAVERN_PERF_HISTORY_PREPEND__/);
     assert.match(source, /tokenInvokeProfiler:\s*getTokenInvokeProfilerSnapshot\(\)/);
+    assert.match(source, /slowInteractionGroups:\s*groupSlowInteractions/);
+    assert.match(source, /longTaskProfiler:\s*getLongTaskProfilerSnapshot\(\)/);
+    assert.match(source, /capture:\s*getCaptureSnapshot\(\)/);
     assert.match(source, /__TAURITAVERN_PERF_INVOKE_BROKER__/);
     assert.doesNotMatch(source, /tokenInvokeSamples\.push\(\{[\s\S]*?messages:/);
 });
@@ -50,12 +53,15 @@ test('automation diagnostics omit script text and command arguments', async () =
     assert.doesNotMatch(slashClosureSource, /value:\s*value/);
 });
 
-test('performance profiler captures interaction latency and heat signals only while enabled', async () => {
+test('performance profiler starts by default and still supports explicit stop', async () => {
     const profilerSource = await readFile(path.join(REPO_ROOT, 'src/scripts/extensions/tauritavern-perf-profiler/index.js'), 'utf8');
     const diagnosticsSource = await readFile(path.join(REPO_ROOT, 'src/scripts/tauri/perf/runtime-diagnostics.js'), 'utf8');
 
     assert.match(profilerSource, /runtimeDiagnostics\.start\(\)/);
     assert.match(profilerSource, /runtimeDiagnostics\.stop\(\)/);
+    assert.match(profilerSource, /startCapture\(\{ autoStarted: true \}\)/);
+    assert.match(profilerSource, /defaultEnabled:\s*true/);
+    assert.match(profilerSource, /captureAutoStarted/);
     assert.match(profilerSource, /runtimeDiagnostics\.summary\(\)/);
     const renderStatusSource = profilerSource.slice(
         profilerSource.indexOf('function renderStatus()'),
@@ -71,6 +77,8 @@ test('performance profiler captures interaction latency and heat signals only wh
     assert.match(diagnosticsSource, /restoreFetch\(\)/);
     assert.match(diagnosticsSource, /installInvokeProfiler\(\)/);
     assert.match(diagnosticsSource, /restoreInvoke\(\)/);
+    assert.match(diagnosticsSource, /context:\s*readContext\(\)/);
+    assert.match(diagnosticsSource, /computeThreadCpuSamples/);
 });
 
 test('performance traces cover history prepend and message redisplay operations', async () => {
@@ -90,4 +98,8 @@ test('performance traces cover history prepend and message redisplay operations'
     assert.match(source, /renderDurationMs/);
     assert.match(source, /domCommitDurationMs/);
     assert.match(source, /anchorDurationMs/);
+    assert.match(source, /measureAsync\('chat-state-prepare'/);
+    assert.match(source, /measure\('selection-sync'/);
+    assert.match(source, /measureAsync\('chat-created-listeners'/);
+    assert.match(source, /measureAsync\('first-message-listeners'/);
 });

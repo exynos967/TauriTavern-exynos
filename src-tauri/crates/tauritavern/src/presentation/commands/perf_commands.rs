@@ -1,6 +1,20 @@
 use serde::Serialize;
+use std::cmp::Reverse;
 use std::fs;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
+
+const THREAD_SAMPLE_INTERVAL: u64 = 10;
+const MAX_THREAD_SAMPLES: usize = 32;
+static SAMPLE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PerfThreadCpuSample {
+    tid: u32,
+    name: String,
+    cpu_ticks: u64,
+}
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -15,6 +29,8 @@ pub struct PerfRuntimeSample {
     battery_current_microamps: Option<i64>,
     battery_voltage_microvolts: Option<i64>,
     battery_status: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    threads: Option<Vec<PerfThreadCpuSample>>,
 }
 
 fn read_trimmed(path: &str) -> Option<String> {
@@ -52,6 +68,33 @@ fn parse_resident_memory_bytes(status: &str) -> Option<u64> {
         .parse::<u64>()
         .ok()?
         .checked_mul(1024)
+}
+
+fn read_thread_cpu_samples() -> Option<Vec<PerfThreadCpuSample>> {
+    let mut samples = fs::read_dir("/proc/self/task")
+        .ok()?
+        .filter_map(Result::ok)
+        .filter_map(|entry| {
+            let tid = entry.file_name().to_string_lossy().parse::<u32>().ok()?;
+            let task_path = entry.path();
+            let cpu_ticks = read_trimmed(task_path.join("stat").to_str()?)
+                .as_deref()
+                .and_then(parse_process_cpu_ticks)?;
+            let name = read_trimmed(task_path.join("comm").to_str()?)
+                .unwrap_or_else(|| "unknown".to_string())
+                .chars()
+                .take(64)
+                .collect();
+            Some(PerfThreadCpuSample {
+                tid,
+                name,
+                cpu_ticks,
+            })
+        })
+        .collect::<Vec<_>>();
+    samples.sort_unstable_by_key(|sample| Reverse(sample.cpu_ticks));
+    samples.truncate(MAX_THREAD_SAMPLES);
+    Some(samples)
 }
 
 fn read_battery_path(name: &str) -> Option<String> {
@@ -105,6 +148,11 @@ fn sample_runtime() -> PerfRuntimeSample {
         .and_then(parse_resident_memory_bytes);
     let battery_temperature_c =
         read_battery_number::<f64>("temp").map(normalize_battery_temperature);
+    let threads = SAMPLE_SEQUENCE
+        .fetch_add(1, Ordering::Relaxed)
+        .is_multiple_of(THREAD_SAMPLE_INTERVAL)
+        .then(read_thread_cpu_samples)
+        .flatten();
 
     PerfRuntimeSample {
         sampled_at_unix_ms,
@@ -119,6 +167,7 @@ fn sample_runtime() -> PerfRuntimeSample {
         battery_current_microamps: read_battery_number("current_now"),
         battery_voltage_microvolts: read_battery_number("voltage_now"),
         battery_status: read_battery_path("status"),
+        threads,
     }
 }
 

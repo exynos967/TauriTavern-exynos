@@ -5,7 +5,7 @@
 - 分析日期：2026-07-14
 - TauriTavern 分支：`optimization/performance`
 - 埋点基线分支：`perf`
-- 当前运行时代码：`558f4278`（含聊天预热裁剪与流式 no-op DOM commit 去重；主题 unchanged-field 去重已回退）
+- 当前运行时代码：`558f4278` 运行时优化 + Schema 11 性能监视器（默认自动采集、线程 CPU 与长任务归因；待新 APK 实测）
 - 最新实测运行时代码：`d0226330`（该实测构建仍包含随后回退的主题 unchanged-field guard）
 - 最新实测构建：TauriTavern 2.1.1 `arm64-v8a` optimization-11 Perf Release
 - 最新性能样本：`tauritavern-perf-2026-07-14T06-16-12.117Z.json`
@@ -193,15 +193,25 @@ optimization-11 的 2 次真实生成持续 120.6 s 和 148.3 s，共输出 4,92
 
 ### 4.3 性能监视器覆盖
 
-`perf` 基线及本分支后续提交已覆盖世界书、generation、流式阶段、聊天加载、慢交互、长聊天 prepend、事件监听器、Quick Reply、Slash Command、网络、Android CPU/RSS、长任务、DOM、Tokenizer broker queue/transport/cache/dedupe。`9a99d2c8` 只增加 tokenizer 精准埋点，不改变 DTO、策略、返回值或异常。
+`perf` 基线及本分支后续提交已覆盖世界书、generation、流式阶段、聊天加载、慢交互、长聊天 prepend、事件监听器、Quick Reply、Slash Command、网络、Android CPU/RSS、长任务、DOM、Tokenizer broker queue/transport/cache/dedupe。Schema 11 进一步增加：
+
+1. 应用加载性能扩展后默认自动开始采集，仍保留手动停止、重新开始、清空和导出；
+2. 每个健康样本记录当前 generation record、trace run、dry run、阶段和相对耗时；
+3. 长任务保存时间区间、generation 归属及重叠的慢 phase，便于定位半秒卡顿发生在哪个阶段；
+4. slow interaction 保留原始事件，同时按 `interactionId` 或同时间事件聚合，并关联重叠长任务；
+5. chat load 新增 `chat-state-prepare`、selection sync、chat-created 和 first-message listener 阶段；
+6. Android native sampler 每 10 次采样补一次最多 32 个线程的 CPU ticks，并在前端计算线程 CPU 百分比；
+7. 报告记录 profiler callback 累计耗时、回调次数和 snapshot 构建耗时，用于估算监视器自身成本。
+
+Schema 11 只增加诊断字段和默认启动行为，不改变生成请求、事件 await、聊天载荷、最终消息或请求体。
 
 ## 5. 后续优化计划
 
 ### P0：定位生成期间持续 CPU 与偶发超长任务
 
 1. 删除 `Generate()` 中仅用于控制台 TPS 统计的逐 chunk timestamp 数组，改为首时间、末时间和计数；
-2. 把真实生成稳定区间与开始/结束、聊天保存、交互和 profiler 工作分开统计，定位 451–615 ms 长任务发生阶段；
-3. 增加主线程与宿主/其他线程 CPU 的可归因证据，并做 profiler 开启/关闭 A/B，避免把采集开销误判为业务 CPU；
+2. Schema 11 已把健康采样、长任务、慢 phase 和 generation trace 关联，下一份报告验证 451–615 ms 长任务的具体阶段；
+3. Schema 11 已增加宿主线程 CPU ticks 和 profiler callback 开销；仍需用同一固定场景做 profiler 开启/关闭 A/B；
 4. 继续记录 regex、Markdown、sanitize、Token 事件和 DOM commit 的输入长度与成本，不跳过事件、不省略最终完整格式化；
 5. 以每千字符 CPU time、无 >200 ms 稳态长任务、最终 HTML 和请求体一致性验收。
 
@@ -341,19 +351,19 @@ optimization-11 样本 SHA-256：`95350A45E63FA20BD08779A1D6CE004D9F94F40E97BE04
 8. prefix tokenizer 已通过本地等价测试，但最新样本没有保存最终请求体快照，不能仅凭性能报告完成端到端功能等价证明；
 9. 最新样本只有 2 次真实生成，CPU、流式和真实生成阶段对照只能作为方向性证据；
 10. slow interaction 会为同一次物理操作保留多个 pointer/mouse/click 事件，不能把条数或时长直接相加；
-11. `processCpuPercent` 是进程级采样，当前没有线程级归因；主线程 busy ratio 下降而进程 CPU 上升时，不能直接把差值归因于某一模块。
+11. 最新实机样本只有进程级 CPU，不能把差值归因于某一模块；Schema 11 已增加低频线程采样，但尚未获得 Android 实机数据。
 
 ## 10. 埋点缺口
 
-当前代码和最新实机样本均为 Schema 10，已覆盖 generation、世界书、流式、聊天加载、交互、网络、监听器稳定身份、Slash Command、Quick Reply、Android CPU fallback，以及 Tokenizer broker queue/transport/cache/dedupe。剩余缺口：
+当前代码为 Schema 11，最新实机样本仍为 Schema 10。Schema 11 已补默认自动采集、generation context、长任务/phase 关联、交互聚合、聊天细分、线程 CPU 和 profiler 自身开销。剩余缺口：
 
 1. Prompt Manager dry run 的触发来源、合并次数、排队时间和实际执行次数；
-2. Rust tokenizer 内部模型加载和实际 encode CPU 的进一步拆分；
+2. Rust tokenizer 内部模型加载和实际 encode CPU 的进一步拆分；线程采样只能定位线程，不能直接定位函数；
 3. 世界书 prepared-entry cache 所需的 revision 和失效来源；
 4. DOM 节点模块归属和 detached node；
 5. settings 请求调用方、字节数和磁盘阶段；
 6. history prepend 的图片/iframe hydration；
-7. profiler 开启/关闭的 CPU、内存和输入延迟 A/B；
+7. profiler 开启/关闭的 CPU、内存和输入延迟固定场景 A/B；
 8. 设备允许时的电池温度、电流和电压。
 
 ## 11. 最终结论
@@ -366,6 +376,7 @@ optimization-11 样本 SHA-256：`95350A45E63FA20BD08779A1D6CE004D9F94F40E97BE04
 - 流式严格相同 HTML 的 no-op DOM commit 已去重，实机跳过 33.1% DOM 写入；相近输出规模下每千字符格式化和 DOM commit 耗时分别下降 49.7% 和 54.0%；
 - 当前最严重问题依次是：生成期间持续进程 CPU 与偶发 451–615 ms 长任务、按钮/菜单事件链和 presentation delay、约一秒的聊天加载与消息重绘；
 - 流式主线程 busy ratio 已下降 55.6%，原“流式全量格式化/DOM 重复提交”不再是唯一 P0 根因；剩余 CPU 必须补线程归因和 profiler A/B 后再优化；
+- Schema 11 已默认自动开始采集，并补线程 CPU、generation context、长任务/phase、交互聚合和 profiler 开销；这些字段需由下一版 APK 实机验证；
 - 世界书 5,363 条真实生成已稳定在约 0.8–1.0 s，仍可感知但已降为次级问题；DOM/RSS 基线仍会放大布局、绘制和长期运行压力；
 - settings 和持久化是次级异步成本，不能用有状态风险的 TTL 缓存草率处理；
 - 后续优化必须以最终请求体、世界书激活、消息 HTML、变量状态、事件顺序和 viewport 等价为前提。

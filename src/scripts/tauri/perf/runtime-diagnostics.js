@@ -86,7 +86,30 @@ export function computeProcessCpuPercent(sample, previous) {
     return round((processDelta / clockTicksPerSecond) / (wallDeltaMs / 1000) * 100);
 }
 
-export function createRuntimeDiagnostics({ nativeSampler } = {}) {
+export function computeThreadCpuSamples(sample, previous) {
+    if (!Array.isArray(sample?.threads)) {
+        return null;
+    }
+
+    const previousThreads = new Map((previous?.threads ?? []).map(thread => [Number(thread.tid), thread]));
+    return sample.threads.map(thread => {
+        const previousThread = previousThreads.get(Number(thread.tid));
+        const cpuPercent = previousThread && previousThread.name === thread.name
+            ? computeProcessCpuPercent(
+                { ...sample, processCpuTicks: thread.cpuTicks },
+                { ...previous, processCpuTicks: previousThread.cpuTicks },
+            )
+            : null;
+        return {
+            tid: Number(thread.tid),
+            name: String(thread.name ?? 'unknown'),
+            cpuTicks: Number(thread.cpuTicks) || 0,
+            cpuPercent,
+        };
+    });
+}
+
+export function createRuntimeDiagnostics({ nativeSampler, contextProvider } = {}) {
     const state = {
         running: false,
         sessionId: 0,
@@ -120,6 +143,7 @@ export function createRuntimeDiagnostics({ nativeSampler } = {}) {
         lastFrameAt: null,
         lastHealthAt: null,
         nativeSample: null,
+        nativeThreadSample: null,
         rafId: null,
         healthTimer: null,
         eventLoopTimer: null,
@@ -159,12 +183,30 @@ export function createRuntimeDiagnostics({ nativeSampler } = {}) {
             const sample = await nativeSampler();
             if (sample && typeof sample === 'object') {
                 sample.processCpuPercent = computeNativeCpuPercent(sample);
+                if (Array.isArray(sample.threads)) {
+                    const rawThreadSample = structuredClone(sample);
+                    sample.threads = computeThreadCpuSamples(sample, state.nativeThreadSample);
+                    state.nativeThreadSample = rawThreadSample;
+                }
                 state.nativeSample = sample;
             }
         } catch {
             state.capabilities.nativeSample = false;
         } finally {
             state.nativeSamplePending = false;
+        }
+    }
+
+    function readContext() {
+        if (typeof contextProvider !== 'function') {
+            return null;
+        }
+
+        try {
+            const context = contextProvider();
+            return context && typeof context === 'object' ? structuredClone(context) : null;
+        } catch {
+            return null;
         }
     }
 
@@ -194,6 +236,7 @@ export function createRuntimeDiagnostics({ nativeSampler } = {}) {
             mainThreadBusyRatio: round(Math.max(longTaskBusyRatio, frameDelayBusyRatio), 3),
             networkInFlight: state.networkInFlight,
             invokeInFlight: state.invokeInFlight,
+            context: readContext(),
             ...runtime,
             native: state.nativeSample ? structuredClone(state.nativeSample) : null,
         }, MAX_HEALTH_SAMPLES);
@@ -241,6 +284,7 @@ export function createRuntimeDiagnostics({ nativeSampler } = {}) {
             secondFrameMs: null,
             totalMs: null,
             target: describeInteractionTarget(event.target),
+            context: readContext(),
         };
 
         queueMicrotask(() => {
@@ -306,6 +350,7 @@ export function createRuntimeDiagnostics({ nativeSampler } = {}) {
                 status: null,
                 ok: null,
                 error: null,
+                context: readContext(),
             };
             state.networkInFlight += 1;
             state.networkInFlightMax = Math.max(state.networkInFlightMax, state.networkInFlight);
@@ -360,6 +405,7 @@ export function createRuntimeDiagnostics({ nativeSampler } = {}) {
                 durationMs: null,
                 ok: null,
                 error: null,
+                context: readContext(),
             };
             state.invokeInFlight += 1;
             state.invokeInFlightMax = Math.max(state.invokeInFlightMax, state.invokeInFlight);
@@ -411,6 +457,7 @@ export function createRuntimeDiagnostics({ nativeSampler } = {}) {
         state.startedAt = now();
         state.lastHealthAt = state.startedAt;
         state.lastFrameAt = null;
+        state.nativeThreadSample = null;
         state.nextEventLoopProbeAt = now() + EVENT_LOOP_PROBE_INTERVAL_MS;
         resetWindow();
         globalThis.document?.addEventListener('click', onClick, true);
@@ -457,6 +504,7 @@ export function createRuntimeDiagnostics({ nativeSampler } = {}) {
         state.networkRequests = [];
         state.invokes = [];
         state.healthSamples = [];
+        state.nativeThreadSample = null;
         state.networkInFlightMax = state.networkInFlight;
         state.invokeInFlightMax = state.invokeInFlight;
     }

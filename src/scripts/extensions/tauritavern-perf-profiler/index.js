@@ -1,6 +1,11 @@
 import { eventSource, event_types } from '../../../script.js';
 import { invoke, isTauri } from '../../../tauri-bridge.js';
 import { serializeSlowInteraction } from '../../tauri/perf/interaction-timing.js';
+import {
+    createLongTaskSample,
+    groupSlowInteractions,
+    linkLongTaskPhase,
+} from '../../tauri/perf/performance-attribution.js';
 import { createRuntimeDiagnostics } from '../../tauri/perf/runtime-diagnostics.js';
 
 const GLOBAL_KEY = '__TAURITAVERN_PERF_PROFILER__';
@@ -15,12 +20,13 @@ const MAX_STREAM_FORMAT_SAMPLES = 300;
 const MAX_HISTORY_PREPEND_SAMPLES = 200;
 const MAX_TOKEN_INVOKE_SAMPLES = 300;
 const MAX_SLOW_LISTENERS = 100;
+const MAX_LONG_TASK_SAMPLES = 300;
+const MAX_PHASE_SAMPLES = 600;
+const MAX_RECENT_LONG_TASK_CANDIDATES = 50;
+const MAX_RECENT_PHASE_CANDIDATES = 100;
 const SLOW_LISTENER_THRESHOLD_MS = 8;
+const SLOW_PHASE_THRESHOLD_MS = 8;
 const TOKEN_INVOKE_COMMANDS = new Set(['count_openai_tokens_batch', 'count_openai_token_prefixes']);
-
-const runtimeDiagnostics = createRuntimeDiagnostics({
-    nativeSampler: isTauri() ? () => invoke('get_perf_runtime_sample') : undefined,
-});
 
 const state = {
     capturing: false,
@@ -50,12 +56,27 @@ const state = {
     slowListenerObserved: 0,
     slowListenerDropped: 0,
     listenerAggregates: new Map(),
+    longTaskSamples: [],
+    longTaskObserved: 0,
+    longTaskDropped: 0,
+    phaseSamples: [],
+    captureStartedAt: null,
+    captureStoppedAt: null,
+    captureAutoStarted: false,
+    profilerOverheadMs: 0,
+    profilerCallbackCount: 0,
     rafId: null,
     lastFrameAt: null,
     panel: null,
     status: null,
     toggleButton: null,
+    captureButton: null,
 };
+
+const runtimeDiagnostics = createRuntimeDiagnostics({
+    nativeSampler: isTauri() ? () => invoke('get_perf_runtime_sample') : undefined,
+    contextProvider: getCurrentCaptureContext,
+});
 
 function now() {
     return globalThis.performance?.now?.() ?? Date.now();
@@ -69,6 +90,91 @@ function finiteRound(value, digits = 1) {
 
     const factor = 10 ** digits;
     return Math.round(number * factor) / factor;
+}
+
+function measureProfilerWork(action) {
+    const startedAt = now();
+    try {
+        return action();
+    } finally {
+        state.profilerCallbackCount += 1;
+        state.profilerOverheadMs += Math.max(0, now() - startedAt);
+    }
+}
+
+function pushBounded(collection, value, limit) {
+    collection.push(value);
+    if (collection.length <= limit) {
+        return 0;
+    }
+
+    const dropped = collection.length - limit;
+    collection.splice(0, dropped);
+    return dropped;
+}
+
+function findRecordForInterval(startTime, durationMs) {
+    const endedAt = startTime + Math.max(0, Number(durationMs) || 0);
+    return [state.current, ...state.records.slice().reverse()].find(record => record
+        && endedAt > record.startedAt
+        && (record.endedAt === null || startTime < record.endedAt)) ?? null;
+}
+
+function getCurrentCaptureContext() {
+    const record = state.current;
+    return record ? {
+        generationRecordId: record.id,
+        generationTraceRunId: record.generation.traceRunId,
+        generationType: record.type,
+        dryRun: record.dryRun,
+        elapsedMs: finiteRound(now() - record.startedAt),
+        stage: record.stream.firstChunkAtMs === null ? 'pre-stream' : 'streaming',
+    } : null;
+}
+
+function observePhaseEntry(entry) {
+    const durationMs = Number(entry.duration) || 0;
+    if (durationMs < SLOW_PHASE_THRESHOLD_MS) {
+        return;
+    }
+
+    const phase = {
+        name: entry.name.slice(3),
+        startTime: finiteRound(entry.startTime),
+        durationMs: finiteRound(durationMs),
+        runId: entry.detail?.runId ? String(entry.detail.runId) : null,
+    };
+    pushBounded(state.phaseSamples, phase, MAX_PHASE_SAMPLES);
+    const firstCandidate = Math.max(0, state.longTaskSamples.length - MAX_RECENT_LONG_TASK_CANDIDATES);
+    for (let index = state.longTaskSamples.length - 1; index >= firstCandidate; index -= 1) {
+        const longTask = state.longTaskSamples[index];
+        linkLongTaskPhase(longTask, phase);
+    }
+}
+
+function getLongTaskProfilerSnapshot() {
+    return {
+        observed: state.longTaskObserved,
+        stored: state.longTaskSamples.length,
+        dropped: state.longTaskDropped,
+        phaseThresholdMs: SLOW_PHASE_THRESHOLD_MS,
+        samples: structuredClone(state.longTaskSamples),
+    };
+}
+
+function getCaptureSnapshot() {
+    const endedAt = state.capturing ? now() : state.captureStoppedAt;
+    return {
+        defaultEnabled: true,
+        autoStarted: state.captureAutoStarted,
+        capturing: state.capturing,
+        startedAt: finiteRound(state.captureStartedAt),
+        durationMs: state.captureStartedAt === null || endedAt === null
+            ? null
+            : finiteRound(endedAt - state.captureStartedAt),
+        profilerCallbackCount: state.profilerCallbackCount,
+        profilerOverheadMs: finiteRound(state.profilerOverheadMs),
+    };
 }
 
 function getCollectionSize(value) {
@@ -190,18 +296,17 @@ function onGenerationStarted(type, _options, dryRun) {
 }
 
 function installTraceStartProfiler() {
-    globalThis.__TAURITAVERN_PERF_TRACE_STARTED__ = ({ prefix, runId, startedAt, detail } = {}) => {
-        if (!state.capturing || prefix !== 'tt:generation' || !runId) {
-            return;
+    globalThis.__TAURITAVERN_PERF_TRACE_STARTED__ = payload => measureProfilerWork(() => {
+        const { prefix, runId, startedAt, detail } = payload ?? {};
+        if (state.capturing && prefix === 'tt:generation' && runId) {
+            finalizeRecord('superseded');
+            state.current = createRecord(detail?.type, detail?.dryRun, {
+                startedAt: Number(startedAt) || now(),
+                generationTraceRunId: String(runId),
+            });
+            renderStatus();
         }
-
-        finalizeRecord('superseded');
-        state.current = createRecord(detail?.type, detail?.dryRun, {
-            startedAt: Number(startedAt) || now(),
-            generationTraceRunId: String(runId),
-        });
-        renderStatus();
-    };
+    });
 }
 
 function storeUnattributedTrace(name, entry, trace, reason) {
@@ -298,17 +403,32 @@ function installLongTaskObserver() {
 
     try {
         state.observer = new PerformanceObserver(list => {
-            for (const entry of list.getEntries()) {
-                const record = state.current;
-                if (!record || entry.startTime < record.startedAt) {
-                    continue;
+            measureProfilerWork(() => {
+                if (!state.capturing) {
+                    return;
                 }
+                for (const entry of list.getEntries()) {
+                    const duration = Number(entry.duration) || 0;
+                    const record = findRecordForInterval(entry.startTime, duration);
+                    const sample = createLongTaskSample(entry, {
+                        recordId: record?.id ?? null,
+                        generationTraceRunId: record?.generation?.traceRunId ?? null,
+                    });
+                    const firstCandidate = Math.max(0, state.phaseSamples.length - MAX_RECENT_PHASE_CANDIDATES);
+                    for (let index = state.phaseSamples.length - 1; index >= firstCandidate; index -= 1) {
+                        const phase = state.phaseSamples[index];
+                        linkLongTaskPhase(sample, phase);
+                    }
+                    state.longTaskObserved += 1;
+                    state.longTaskDropped += pushBounded(state.longTaskSamples, sample, MAX_LONG_TASK_SAMPLES);
 
-                const duration = Number(entry.duration) || 0;
-                record.responsiveness.longTasks += 1;
-                record.responsiveness.longTaskTotalMs = finiteRound(record.responsiveness.longTaskTotalMs + duration);
-                record.responsiveness.maxLongTaskMs = finiteRound(Math.max(record.responsiveness.maxLongTaskMs, duration));
-            }
+                    if (record) {
+                        record.responsiveness.longTasks += 1;
+                        record.responsiveness.longTaskTotalMs = finiteRound(record.responsiveness.longTaskTotalMs + duration);
+                        record.responsiveness.maxLongTaskMs = finiteRound(Math.max(record.responsiveness.maxLongTaskMs, duration));
+                    }
+                }
+            });
         });
         state.observer.observe({ type: 'longtask', buffered: false });
     } catch {
@@ -323,67 +443,76 @@ function installMeasureObserver() {
 
     try {
         state.measureObserver = new PerformanceObserver(list => {
-            for (const entry of list.getEntries()) {
-                if (!entry.name.startsWith('tt:') || !entry.name.endsWith(':total')) {
-                    continue;
+            measureProfilerWork(() => {
+                if (!state.capturing) {
+                    return;
                 }
+                for (const entry of list.getEntries()) {
+                    if (!entry.name.startsWith('tt:')) {
+                        continue;
+                    }
+                    if (!entry.name.endsWith(':total')) {
+                        observePhaseEntry(entry);
+                        continue;
+                    }
 
-                const trace = {
-                    durationMs: finiteRound(entry.duration),
-                    ...(entry.detail && typeof entry.detail === 'object' ? structuredClone(entry.detail) : {}),
-                };
+                    const trace = {
+                        durationMs: finiteRound(entry.duration),
+                        ...(entry.detail && typeof entry.detail === 'object' ? structuredClone(entry.detail) : {}),
+                    };
 
-                if (entry.name === 'tt:chat-load:total') {
-                    state.chatLoads.push({
-                        startedAt: finiteRound(entry.startTime),
-                        ...trace,
-                    });
-                    if (state.chatLoads.length > MAX_CHAT_LOADS) {
-                        state.chatLoads.splice(0, state.chatLoads.length - MAX_CHAT_LOADS);
+                    if (entry.name === 'tt:chat-load:total') {
+                        state.chatLoads.push({
+                            startedAt: finiteRound(entry.startTime),
+                            ...trace,
+                        });
+                        if (state.chatLoads.length > MAX_CHAT_LOADS) {
+                            state.chatLoads.splice(0, state.chatLoads.length - MAX_CHAT_LOADS);
+                        }
+                        renderStatus();
+                        continue;
+                    }
+
+                    if (!['tt:generation:total', 'tt:world-info:total', 'tt:stream:total'].includes(entry.name)) {
+                        state.operations.push({
+                            name: entry.name.slice(3, -6),
+                            startedAt: finiteRound(entry.startTime),
+                            ...trace,
+                        });
+                        if (state.operations.length > MAX_OPERATIONS) {
+                            state.operations.splice(0, state.operations.length - MAX_OPERATIONS);
+                        }
+                        renderStatus();
+                        continue;
+                    }
+
+                    const expectedGenerationRunId = entry.name === 'tt:generation:total'
+                        ? trace.runId
+                        : trace.parentRunId;
+                    const record = expectedGenerationRunId
+                        ? [state.current, ...state.records.slice().reverse()]
+                            .find(candidate => candidate?.generation?.traceRunId === expectedGenerationRunId)
+                        : null;
+                    if (!record) {
+                        storeUnattributedTrace(
+                            entry.name.slice(3, -6),
+                            entry,
+                            trace,
+                            expectedGenerationRunId ? 'generation-record-not-found' : 'missing-parent-run-id',
+                        );
+                        continue;
+                    }
+
+                    if (entry.name === 'tt:generation:total') {
+                        record.generation.trace = trace;
+                    } else if (entry.name === 'tt:world-info:total') {
+                        record.worldInfo.trace = trace;
+                    } else {
+                        record.stream.trace = trace;
                     }
                     renderStatus();
-                    continue;
                 }
-
-                if (!['tt:generation:total', 'tt:world-info:total', 'tt:stream:total'].includes(entry.name)) {
-                    state.operations.push({
-                        name: entry.name.slice(3, -6),
-                        startedAt: finiteRound(entry.startTime),
-                        ...trace,
-                    });
-                    if (state.operations.length > MAX_OPERATIONS) {
-                        state.operations.splice(0, state.operations.length - MAX_OPERATIONS);
-                    }
-                    renderStatus();
-                    continue;
-                }
-
-                const expectedGenerationRunId = entry.name === 'tt:generation:total'
-                    ? trace.runId
-                    : trace.parentRunId;
-                const record = expectedGenerationRunId
-                    ? [state.current, ...state.records.slice().reverse()]
-                        .find(candidate => candidate?.generation?.traceRunId === expectedGenerationRunId)
-                    : null;
-                if (!record) {
-                    storeUnattributedTrace(
-                        entry.name.slice(3, -6),
-                        entry,
-                        trace,
-                        expectedGenerationRunId ? 'generation-record-not-found' : 'missing-parent-run-id',
-                    );
-                    continue;
-                }
-
-                if (entry.name === 'tt:generation:total') {
-                    record.generation.trace = trace;
-                } else if (entry.name === 'tt:world-info:total') {
-                    record.worldInfo.trace = trace;
-                } else {
-                    record.stream.trace = trace;
-                }
-                renderStatus();
-            }
+            });
         });
         state.measureObserver.observe({ type: 'measure', buffered: false });
     } catch {
@@ -392,77 +521,79 @@ function installMeasureObserver() {
 }
 
 function installEventListenerProfiler() {
-    globalThis.__TAURITAVERN_PERF_EVENT_LISTENER__ = ({
-        event,
-        listener,
-        registration,
-        index,
-        durationMs,
-        synchronousDurationMs,
-        waitDurationMs,
-    }) => {
-        if (!state.capturing || durationMs < SLOW_LISTENER_THRESHOLD_MS) {
+    globalThis.__TAURITAVERN_PERF_EVENT_LISTENER__ = sample => {
+        if (!state.capturing || Number(sample?.durationMs) < SLOW_LISTENER_THRESHOLD_MS) {
             return;
         }
 
-        state.slowListenerObserved += 1;
-        const identity = registration?.stableKey
-            ?? registration?.id
-            ?? `${String(event)}:${registration?.source?.modulePath ?? listener?.name ?? '(anonymous)'}:${Number(index)}`;
-        const aggregate = state.listenerAggregates.get(identity) ?? {
-            identity,
-            event: String(event),
-            registration: registration ? structuredClone(registration) : null,
-            count: 0,
-            totalDurationMs: 0,
-            totalSynchronousMs: 0,
-            totalWaitMs: 0,
-            maxDurationMs: 0,
-        };
-        aggregate.count += 1;
-        aggregate.totalDurationMs += Number(durationMs) || 0;
-        aggregate.totalSynchronousMs += Number(synchronousDurationMs) || 0;
-        aggregate.totalWaitMs += Number(waitDurationMs) || 0;
-        aggregate.maxDurationMs = Math.max(aggregate.maxDurationMs, Number(durationMs) || 0);
-        state.listenerAggregates.set(identity, aggregate);
+        measureProfilerWork(() => {
+            const {
+                event,
+                listener,
+                registration,
+                index,
+                durationMs,
+                synchronousDurationMs,
+                waitDurationMs,
+            } = sample ?? {};
 
-        state.slowListeners.push({
-            event: String(event),
-            listener: registration?.listenerName || listener?.name || '(anonymous)',
-            identity,
-            registration: registration ? structuredClone(registration) : null,
-            index: Number(index),
-            durationMs: finiteRound(durationMs),
-            synchronousDurationMs: finiteRound(synchronousDurationMs),
-            waitDurationMs: finiteRound(waitDurationMs),
-            observedAt: finiteRound(now()),
+            state.slowListenerObserved += 1;
+            const identity = registration?.stableKey
+                ?? registration?.id
+                ?? `${String(event)}:${registration?.source?.modulePath ?? listener?.name ?? '(anonymous)'}:${Number(index)}`;
+            const aggregate = state.listenerAggregates.get(identity) ?? {
+                identity,
+                event: String(event),
+                registration: registration ? structuredClone(registration) : null,
+                count: 0,
+                totalDurationMs: 0,
+                totalSynchronousMs: 0,
+                totalWaitMs: 0,
+                maxDurationMs: 0,
+            };
+            aggregate.count += 1;
+            aggregate.totalDurationMs += Number(durationMs) || 0;
+            aggregate.totalSynchronousMs += Number(synchronousDurationMs) || 0;
+            aggregate.totalWaitMs += Number(waitDurationMs) || 0;
+            aggregate.maxDurationMs = Math.max(aggregate.maxDurationMs, Number(durationMs) || 0);
+            state.listenerAggregates.set(identity, aggregate);
+
+            state.slowListeners.push({
+                event: String(event),
+                listener: registration?.listenerName || listener?.name || '(anonymous)',
+                identity,
+                registration: registration ? structuredClone(registration) : null,
+                index: Number(index),
+                durationMs: finiteRound(durationMs),
+                synchronousDurationMs: finiteRound(synchronousDurationMs),
+                waitDurationMs: finiteRound(waitDurationMs),
+                observedAt: finiteRound(now()),
+            });
+            if (state.slowListeners.length > MAX_SLOW_LISTENERS) {
+                const dropped = state.slowListeners.length - MAX_SLOW_LISTENERS;
+                state.slowListeners.splice(0, dropped);
+                state.slowListenerDropped += dropped;
+            }
         });
-        if (state.slowListeners.length > MAX_SLOW_LISTENERS) {
-            const dropped = state.slowListeners.length - MAX_SLOW_LISTENERS;
-            state.slowListeners.splice(0, dropped);
-            state.slowListenerDropped += dropped;
-        }
     };
 }
 
 function installAutomationProfiler() {
-    globalThis.__TAURITAVERN_PERF_AUTOMATION__ = sample => {
-        if (!state.capturing || !sample || typeof sample !== 'object') {
-            return;
+    globalThis.__TAURITAVERN_PERF_AUTOMATION__ = sample => measureProfilerWork(() => {
+        if (state.capturing && sample && typeof sample === 'object') {
+            state.automationObserved += 1;
+            state.automationSamples.push({
+                ...structuredClone(sample),
+                durationMs: finiteRound(sample.durationMs),
+                observedAt: finiteRound(now()),
+            });
+            if (state.automationSamples.length > MAX_AUTOMATION_SAMPLES) {
+                const dropped = state.automationSamples.length - MAX_AUTOMATION_SAMPLES;
+                state.automationSamples.splice(0, dropped);
+                state.automationDropped += dropped;
+            }
         }
-
-        state.automationObserved += 1;
-        state.automationSamples.push({
-            ...structuredClone(sample),
-            durationMs: finiteRound(sample.durationMs),
-            observedAt: finiteRound(now()),
-        });
-        if (state.automationSamples.length > MAX_AUTOMATION_SAMPLES) {
-            const dropped = state.automationSamples.length - MAX_AUTOMATION_SAMPLES;
-            state.automationSamples.splice(0, dropped);
-            state.automationDropped += dropped;
-        }
-    };
+    });
 }
 
 function getAutomationProfilerSnapshot() {
@@ -475,23 +606,21 @@ function getAutomationProfilerSnapshot() {
 }
 
 function installStreamFormatProfiler() {
-    globalThis.__TAURITAVERN_PERF_STREAM_FORMAT__ = sample => {
-        if (!state.capturing || !sample || typeof sample !== 'object') {
-            return;
+    globalThis.__TAURITAVERN_PERF_STREAM_FORMAT__ = sample => measureProfilerWork(() => {
+        if (state.capturing && sample && typeof sample === 'object') {
+            state.streamFormatObserved += 1;
+            state.streamFormatSamples.push({
+                ...structuredClone(sample),
+                durationMs: finiteRound(sample.durationMs),
+                observedAt: finiteRound(now()),
+            });
+            if (state.streamFormatSamples.length > MAX_STREAM_FORMAT_SAMPLES) {
+                const dropped = state.streamFormatSamples.length - MAX_STREAM_FORMAT_SAMPLES;
+                state.streamFormatSamples.splice(0, dropped);
+                state.streamFormatDropped += dropped;
+            }
         }
-
-        state.streamFormatObserved += 1;
-        state.streamFormatSamples.push({
-            ...structuredClone(sample),
-            durationMs: finiteRound(sample.durationMs),
-            observedAt: finiteRound(now()),
-        });
-        if (state.streamFormatSamples.length > MAX_STREAM_FORMAT_SAMPLES) {
-            const dropped = state.streamFormatSamples.length - MAX_STREAM_FORMAT_SAMPLES;
-            state.streamFormatSamples.splice(0, dropped);
-            state.streamFormatDropped += dropped;
-        }
-    };
+    });
 }
 
 function getStreamFormatProfilerSnapshot() {
@@ -504,26 +633,24 @@ function getStreamFormatProfilerSnapshot() {
 }
 
 function installHistoryPrependProfiler() {
-    globalThis.__TAURITAVERN_PERF_HISTORY_PREPEND__ = sample => {
-        if (!state.capturing || !sample || typeof sample !== 'object') {
-            return;
+    globalThis.__TAURITAVERN_PERF_HISTORY_PREPEND__ = sample => measureProfilerWork(() => {
+        if (state.capturing && sample && typeof sample === 'object') {
+            state.historyPrependObserved += 1;
+            state.historyPrependSamples.push({
+                ...structuredClone(sample),
+                renderDurationMs: finiteRound(sample.renderDurationMs),
+                domCommitDurationMs: finiteRound(sample.domCommitDurationMs),
+                anchorDurationMs: finiteRound(sample.anchorDurationMs),
+                totalDurationMs: finiteRound(sample.totalDurationMs),
+                observedAt: finiteRound(now()),
+            });
+            if (state.historyPrependSamples.length > MAX_HISTORY_PREPEND_SAMPLES) {
+                const dropped = state.historyPrependSamples.length - MAX_HISTORY_PREPEND_SAMPLES;
+                state.historyPrependSamples.splice(0, dropped);
+                state.historyPrependDropped += dropped;
+            }
         }
-
-        state.historyPrependObserved += 1;
-        state.historyPrependSamples.push({
-            ...structuredClone(sample),
-            renderDurationMs: finiteRound(sample.renderDurationMs),
-            domCommitDurationMs: finiteRound(sample.domCommitDurationMs),
-            anchorDurationMs: finiteRound(sample.anchorDurationMs),
-            totalDurationMs: finiteRound(sample.totalDurationMs),
-            observedAt: finiteRound(now()),
-        });
-        if (state.historyPrependSamples.length > MAX_HISTORY_PREPEND_SAMPLES) {
-            const dropped = state.historyPrependSamples.length - MAX_HISTORY_PREPEND_SAMPLES;
-            state.historyPrependSamples.splice(0, dropped);
-            state.historyPrependDropped += dropped;
-        }
-    };
+    });
 }
 
 function getHistoryPrependProfilerSnapshot() {
@@ -536,27 +663,25 @@ function getHistoryPrependProfilerSnapshot() {
 }
 
 function installTokenInvokeProfiler() {
-    globalThis.__TAURITAVERN_PERF_INVOKE_BROKER__ = sample => {
-        if (!state.capturing || !sample || !TOKEN_INVOKE_COMMANDS.has(sample.command)) {
-            return;
+    globalThis.__TAURITAVERN_PERF_INVOKE_BROKER__ = sample => measureProfilerWork(() => {
+        if (state.capturing && sample && TOKEN_INVOKE_COMMANDS.has(sample.command)) {
+            state.tokenInvokeObserved += 1;
+            state.tokenInvokeSamples.push({
+                command: sample.command,
+                outcome: sample.outcome,
+                durationMs: finiteRound(sample.durationMs),
+                queueWaitMs: finiteRound(sample.queueWaitMs),
+                transportDurationMs: finiteRound(sample.transportDurationMs),
+                ok: Boolean(sample.ok),
+                observedAt: finiteRound(now()),
+            });
+            if (state.tokenInvokeSamples.length > MAX_TOKEN_INVOKE_SAMPLES) {
+                const dropped = state.tokenInvokeSamples.length - MAX_TOKEN_INVOKE_SAMPLES;
+                state.tokenInvokeSamples.splice(0, dropped);
+                state.tokenInvokeDropped += dropped;
+            }
         }
-
-        state.tokenInvokeObserved += 1;
-        state.tokenInvokeSamples.push({
-            command: sample.command,
-            outcome: sample.outcome,
-            durationMs: finiteRound(sample.durationMs),
-            queueWaitMs: finiteRound(sample.queueWaitMs),
-            transportDurationMs: finiteRound(sample.transportDurationMs),
-            ok: Boolean(sample.ok),
-            observedAt: finiteRound(now()),
-        });
-        if (state.tokenInvokeSamples.length > MAX_TOKEN_INVOKE_SAMPLES) {
-            const dropped = state.tokenInvokeSamples.length - MAX_TOKEN_INVOKE_SAMPLES;
-            state.tokenInvokeSamples.splice(0, dropped);
-            state.tokenInvokeDropped += dropped;
-        }
-    };
+    });
 }
 
 function getTokenInvokeProfilerSnapshot() {
@@ -591,17 +716,23 @@ function installInteractionObserver() {
 
     try {
         state.interactionObserver = new PerformanceObserver(list => {
-            for (const entry of list.getEntries()) {
-                const interaction = serializeSlowInteraction(entry);
-                if (!interaction) {
-                    continue;
+            measureProfilerWork(() => {
+                if (!state.capturing) {
+                    return;
                 }
+                for (const entry of list.getEntries()) {
+                    const interaction = serializeSlowInteraction(entry);
+                    if (!interaction) {
+                        continue;
+                    }
 
-                state.slowInteractions.push(interaction);
-                if (state.slowInteractions.length > MAX_SLOW_INTERACTIONS) {
-                    state.slowInteractions.splice(0, state.slowInteractions.length - MAX_SLOW_INTERACTIONS);
+                    interaction.context = getCurrentCaptureContext();
+                    state.slowInteractions.push(interaction);
+                    if (state.slowInteractions.length > MAX_SLOW_INTERACTIONS) {
+                        state.slowInteractions.splice(0, state.slowInteractions.length - MAX_SLOW_INTERACTIONS);
+                    }
                 }
-            }
+            });
         });
         state.interactionObserver.observe({ type: 'event', buffered: false, durationThreshold: 100 });
     } catch {
@@ -609,12 +740,17 @@ function installInteractionObserver() {
     }
 }
 
-function startCapture() {
+function startCapture({ autoStarted = false } = {}) {
     if (state.capturing) {
         return;
     }
 
     state.capturing = true;
+    state.captureStartedAt = now();
+    state.captureStoppedAt = null;
+    state.captureAutoStarted = Boolean(autoStarted);
+    state.profilerOverheadMs = 0;
+    state.profilerCallbackCount = 0;
     state.lastFrameAt = null;
     installLongTaskObserver();
     installMeasureObserver();
@@ -637,19 +773,27 @@ function stopCapture() {
 
     finalizeRecord('capture-stopped');
     state.capturing = false;
+    state.captureStoppedAt = now();
     delete globalThis.__TAURITAVERN_PERF_EVENT_LISTENER__;
     delete globalThis.__TAURITAVERN_PERF_TRACE_STARTED__;
     delete globalThis.__TAURITAVERN_PERF_AUTOMATION__;
     delete globalThis.__TAURITAVERN_PERF_STREAM_FORMAT__;
     delete globalThis.__TAURITAVERN_PERF_HISTORY_PREPEND__;
     delete globalThis.__TAURITAVERN_PERF_INVOKE_BROKER__;
+    state.observer?.disconnect();
+    state.observer = null;
+    state.measureObserver?.disconnect();
+    state.measureObserver = null;
+    state.interactionObserver?.disconnect();
+    state.interactionObserver = null;
     runtimeDiagnostics.stop();
     renderStatus();
 }
 
 function snapshot() {
-    return {
-        schemaVersion: 10,
+    const startedAt = now();
+    const report = {
+        schemaVersion: 11,
         exportedAt: new Date().toISOString(),
         userAgent: navigator.userAgent,
         viewport: {
@@ -661,6 +805,8 @@ function snapshot() {
         records: structuredClone(state.records),
         chatLoads: structuredClone(state.chatLoads),
         slowInteractions: structuredClone(state.slowInteractions),
+        slowInteractionGroups: groupSlowInteractions(state.slowInteractions, state.longTaskSamples),
+        longTaskProfiler: getLongTaskProfilerSnapshot(),
         operations: structuredClone(state.operations),
         unattributedTraces: structuredClone(state.unattributedTraces),
         slowListeners: structuredClone(state.slowListeners),
@@ -670,7 +816,10 @@ function snapshot() {
         historyPrependProfiler: getHistoryPrependProfilerSnapshot(),
         tokenInvokeProfiler: getTokenInvokeProfilerSnapshot(),
         diagnostics: runtimeDiagnostics.snapshot(),
+        capture: getCaptureSnapshot(),
     };
+    report.capture.snapshotDurationMs = finiteRound(now() - startedAt);
+    return report;
 }
 
 function downloadReport() {
@@ -693,6 +842,9 @@ function renderStatus() {
     }
 
     state.toggleButton.classList.toggle('is-capturing', state.capturing);
+    if (state.captureButton) {
+        state.captureButton.textContent = state.capturing ? '停止采集' : '开始采集';
+    }
     const record = state.current ?? state.records.at(-1);
     const diagnostics = runtimeDiagnostics.summary();
     if (!record) {
@@ -760,6 +912,7 @@ function createUi() {
     state.toggleButton = toggleButton;
 
     const captureButton = panel.querySelector('[data-action="capture"]');
+    state.captureButton = captureButton;
     toggleButton.addEventListener('click', () => {
         panel.hidden = !panel.hidden;
         renderStatus();
@@ -769,7 +922,6 @@ function createUi() {
     });
     captureButton.addEventListener('click', () => {
         state.capturing ? stopCapture() : startCapture();
-        captureButton.textContent = state.capturing ? '停止采集' : '开始采集';
     });
     panel.querySelector('[data-action="export"]').addEventListener('click', downloadReport);
     panel.querySelector('[data-action="clear"]').addEventListener('click', () => {
@@ -782,6 +934,10 @@ function createUi() {
         state.slowListenerObserved = 0;
         state.slowListenerDropped = 0;
         state.listenerAggregates.clear();
+        state.longTaskSamples = [];
+        state.longTaskObserved = 0;
+        state.longTaskDropped = 0;
+        state.phaseSamples = [];
         state.automationSamples = [];
         state.automationObserved = 0;
         state.automationDropped = 0;
@@ -794,6 +950,10 @@ function createUi() {
         state.tokenInvokeSamples = [];
         state.tokenInvokeObserved = 0;
         state.tokenInvokeDropped = 0;
+        state.captureStartedAt = state.capturing ? now() : null;
+        state.captureStoppedAt = null;
+        state.profilerOverheadMs = 0;
+        state.profilerCallbackCount = 0;
         runtimeDiagnostics.clear();
         renderStatus();
     });
@@ -834,4 +994,6 @@ export function init() {
         configurable: true,
         enumerable: false,
     });
+
+    startCapture({ autoStarted: true });
 }
