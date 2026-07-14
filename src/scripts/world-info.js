@@ -1101,7 +1101,7 @@ export function setWorldInfoSettings(settings, data) {
         const hasWorldInfo = !!chat_metadata[METADATA_KEY] && world_names.includes(chat_metadata[METADATA_KEY]);
         $('.chat_lorebook_button').toggleClass('world_set', hasWorldInfo);
         // Pre-cache the world info data for the chat for quicker first prompt generation
-        await getSortedEntries();
+        await preloadWorldInfoEntries();
     });
 
     eventSource.on(event_types.WORLDINFO_FORCE_ACTIVATE, (entries) => {
@@ -4750,46 +4750,65 @@ async function getPersonaLore() {
     return entries;
 }
 
+async function collectWorldInfoEntries(perfTrace) {
+    const worldsToPrefetch = new Set();
+    for (const worldName of selected_world_info || []) {
+        worldsToPrefetch.add(worldName);
+    }
+
+    const { worldsToSearch } = collectCharacterWorldsToSearch();
+    for (const worldName of worldsToSearch) {
+        worldsToPrefetch.add(worldName);
+    }
+
+    const chatWorld = chat_metadata[METADATA_KEY];
+    if (chatWorld) {
+        worldsToPrefetch.add(chatWorld);
+    }
+
+    const personaWorld = power_user.persona_description_lorebook;
+    if (personaWorld) {
+        worldsToPrefetch.add(personaWorld);
+    }
+
+    await perfTrace.measureAsync('entries-prefetch', () => prefetchWorldInfos(worldsToPrefetch));
+
+    const [
+        globalLore,
+        characterLore,
+        chatLore,
+        personaLore,
+    ] = await perfTrace.measureAsync('entries-collect', () => Promise.all([
+        getGlobalLore(),
+        getCharacterLore(),
+        getChatLore(),
+        getPersonaLore(),
+    ]));
+
+    await perfTrace.measureAsync('entries-loaded-event', () => eventSource.emit(event_types.WORLDINFO_ENTRIES_LOADED, { globalLore, characterLore, chatLore, personaLore }));
+
+    return { globalLore, characterLore, chatLore, personaLore };
+}
+
+async function preloadWorldInfoEntries() {
+    const perfTrace = createPerformanceTrace('tt:world-info', { source: 'preloadWorldInfoEntries' });
+    let succeeded = false;
+    try {
+        await collectWorldInfoEntries(perfTrace);
+        succeeded = true;
+    } catch (error) {
+        console.error(error);
+    } finally {
+        perfTrace.finish({ success: succeeded });
+    }
+}
+
 export async function getSortedEntries(perfTrace = null) {
     const ownsPerfTrace = perfTrace === null;
     perfTrace ??= createPerformanceTrace('tt:world-info', { source: 'getSortedEntries' });
     let succeeded = false;
     try {
-        const worldsToPrefetch = new Set();
-        for (const worldName of selected_world_info || []) {
-            worldsToPrefetch.add(worldName);
-        }
-
-        const { worldsToSearch } = collectCharacterWorldsToSearch();
-        for (const worldName of worldsToSearch) {
-            worldsToPrefetch.add(worldName);
-        }
-
-        const chatWorld = chat_metadata[METADATA_KEY];
-        if (chatWorld) {
-            worldsToPrefetch.add(chatWorld);
-        }
-
-        const personaWorld = power_user.persona_description_lorebook;
-        if (personaWorld) {
-            worldsToPrefetch.add(personaWorld);
-        }
-
-        await perfTrace.measureAsync('entries-prefetch', () => prefetchWorldInfos(worldsToPrefetch));
-
-        const [
-            globalLore,
-            characterLore,
-            chatLore,
-            personaLore,
-        ] = await perfTrace.measureAsync('entries-collect', () => Promise.all([
-            getGlobalLore(),
-            getCharacterLore(),
-            getChatLore(),
-            getPersonaLore(),
-        ]));
-
-        await perfTrace.measureAsync('entries-loaded-event', () => eventSource.emit(event_types.WORLDINFO_ENTRIES_LOADED, { globalLore, characterLore, chatLore, personaLore }));
+        const { globalLore, characterLore, chatLore, personaLore } = await collectWorldInfoEntries(perfTrace);
 
         let entries = perfTrace.measure('entries-sort', () => {
             let sorted;
