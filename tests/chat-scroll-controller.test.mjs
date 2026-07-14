@@ -3,6 +3,7 @@ import test from 'node:test';
 
 import {
     createChatScrollController,
+    createChatScrollIntentTracker,
     isChatViewportAtBottom,
 } from '../src/scripts/tauri/perf/chat-scroll-controller.js';
 
@@ -13,7 +14,10 @@ function createHarness(viewport = { scrollHeight: 1000, clientHeight: 400, scrol
     let scrolls = 0;
     const controller = createChatScrollController({
         readViewport: () => viewport,
-        scrollToBottom: () => { scrolls += 1; },
+        scrollToBottom: () => {
+            scrolls += 1;
+            viewport.scrollTop = Math.max(0, viewport.scrollHeight - viewport.clientHeight);
+        },
         requestFrame: callback => {
             const id = nextFrameId++;
             frames.set(id, callback);
@@ -43,6 +47,26 @@ test('viewport bottom detection tolerates only a small rounding gap', () => {
     assert.equal(isChatViewportAtBottom({ scrollHeight: 1000, clientHeight: 400, scrollTop: 590 }), false);
 });
 
+test('user scroll intent expires without scheduling a timer', () => {
+    let now = 100;
+    const tracker = createChatScrollIntentTracker({ now: () => now, timeoutMs: 1000 });
+
+    assert.equal(tracker.isActive(), false);
+    tracker.mark();
+    assert.equal(tracker.isActive(), true);
+
+    tracker.clear();
+    assert.equal(tracker.isActive(), false);
+
+    tracker.mark();
+
+    now = 1099;
+    assert.equal(tracker.isActive(), true);
+
+    now = 1100;
+    assert.equal(tracker.isActive(), false);
+});
+
 test('generation started away from bottom rejects every follow request', () => {
     const harness = createHarness({ scrollHeight: 1000, clientHeight: 400, scrollTop: 200 });
     harness.controller.beginGeneration();
@@ -58,12 +82,61 @@ test('user scroll away cancels a queued generation scroll', () => {
     assert.equal(harness.controller.requestScroll({ waitForFrame: true }), true);
 
     harness.viewport.scrollTop = 300;
-    harness.controller.onViewportChanged();
+    harness.controller.onViewportChanged({ userInitiated: true });
     harness.flushFrames();
 
     assert.deepEqual(harness.cancelled, [1]);
     assert.equal(harness.scrolls, 0);
     assert.equal(harness.controller.requestScroll(), false);
+});
+
+test('layout shifts do not cancel generation follow that started at the bottom', () => {
+    const harness = createHarness();
+    harness.controller.beginGeneration();
+
+    for (const phase of ['send', 'stream', 'completion']) {
+        harness.viewport.scrollHeight += 100;
+        harness.viewport.scrollTop = 0;
+        harness.controller.onViewportChanged({ userInitiated: false });
+
+        assert.equal(harness.controller.requestScroll({ waitForFrame: true }), true, `${phase} scroll should be scheduled`);
+        harness.flushFrames();
+        assert.equal(
+            harness.viewport.scrollTop,
+            harness.viewport.scrollHeight - harness.viewport.clientHeight,
+            `${phase} should restore the bottom position`,
+        );
+    }
+
+    harness.controller.endGeneration();
+});
+
+test('send-time follow intent survives layout shifts before generation begins', () => {
+    const harness = createHarness();
+    harness.controller.captureGenerationIntent();
+
+    harness.viewport.scrollHeight += 100;
+    harness.viewport.scrollTop = 0;
+    harness.controller.beginGeneration();
+    harness.controller.onViewportChanged({ userInitiated: false });
+
+    assert.equal(harness.controller.requestScroll({ waitForFrame: true }), true);
+    harness.flushFrames();
+    assert.equal(harness.viewport.scrollTop, harness.viewport.scrollHeight - harness.viewport.clientHeight);
+
+    harness.controller.endGeneration();
+});
+
+test('cleared send-time intent does not leak into a later generation', () => {
+    const harness = createHarness();
+    harness.controller.captureGenerationIntent();
+    harness.controller.clearGenerationIntent();
+
+    harness.viewport.scrollTop = 0;
+    harness.controller.beginGeneration();
+
+    assert.equal(harness.controller.requestScroll(), false);
+    harness.controller.endGeneration();
 });
 
 test('viewport changes read the current controller state', () => {

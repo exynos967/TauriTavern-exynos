@@ -1,7 +1,27 @@
 const DEFAULT_BOTTOM_THRESHOLD = 5;
+const DEFAULT_USER_SCROLL_INTENT_TIMEOUT_MS = 1000;
 
 export function isChatViewportAtBottom({ scrollHeight, clientHeight, scrollTop }, threshold = DEFAULT_BOTTOM_THRESHOLD) {
     return Math.abs(Number(scrollHeight) - Number(clientHeight) - Number(scrollTop)) < threshold;
+}
+
+export function createChatScrollIntentTracker({
+    now = () => performance.now(),
+    timeoutMs = DEFAULT_USER_SCROLL_INTENT_TIMEOUT_MS,
+} = {}) {
+    let activeUntil = Number.NEGATIVE_INFINITY;
+
+    return Object.freeze({
+        mark() {
+            activeUntil = Number(now()) + timeoutMs;
+        },
+        clear() {
+            activeUntil = Number.NEGATIVE_INFINITY;
+        },
+        isActive() {
+            return Number(now()) < activeUntil;
+        },
+    });
 }
 
 export function createChatScrollController({
@@ -14,6 +34,7 @@ export function createChatScrollController({
 }) {
     let generationDepth = 0;
     let generationFollowsOutput = true;
+    let pendingGenerationFollowsOutput = null;
     let pendingFrame = null;
 
     const cancelPending = () => {
@@ -27,9 +48,19 @@ export function createChatScrollController({
     const isAtBottom = () => isChatViewportAtBottom(readViewport(), bottomThreshold);
 
     return Object.freeze({
+        captureGenerationIntent() {
+            pendingGenerationFollowsOutput = isAtBottom();
+            return pendingGenerationFollowsOutput;
+        },
+        clearGenerationIntent() {
+            pendingGenerationFollowsOutput = null;
+        },
         beginGeneration() {
             if (generationDepth === 0) {
-                generationFollowsOutput = isAtBottom();
+                generationFollowsOutput = typeof pendingGenerationFollowsOutput === 'boolean'
+                    ? pendingGenerationFollowsOutput
+                    : isAtBottom();
+                pendingGenerationFollowsOutput = null;
                 if (!generationFollowsOutput) {
                     cancelPending();
                 }
@@ -39,11 +70,11 @@ export function createChatScrollController({
         endGeneration() {
             generationDepth = Math.max(0, generationDepth - 1);
         },
-        onViewportChanged() {
+        onViewportChanged({ userInitiated = true } = {}) {
             const atBottom = isAtBottom();
             if (generationDepth === 0) {
                 generationFollowsOutput = atBottom;
-            } else if (!atBottom) {
+            } else if (!atBottom && userInitiated) {
                 generationFollowsOutput = false;
                 cancelPending();
             }

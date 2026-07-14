@@ -15,7 +15,7 @@ import { replaceMesTextHtmlWithRuntimePolicy } from './scripts/tauri/message/mes
 import { getCodeHighlightCoordinator } from './scripts/tauri/perf/code-highlight-coordinator.js';
 import { isInlineDrawerContentOpen, setInlineDrawerContentOpen } from './scripts/tauri/perf/inline-drawer-motion.js';
 import { createPerformanceTrace } from './scripts/tauri/perf/performance-trace.js';
-import { createChatScrollController } from './scripts/tauri/perf/chat-scroll-controller.js';
+import { createChatScrollController, createChatScrollIntentTracker } from './scripts/tauri/perf/chat-scroll-controller.js';
 import { getMessageRenderBatches } from './scripts/tauri/perf/message-render-batches.js';
 import { getHistoryPrependProfiler, reportHistoryPrependBatch } from './scripts/tauri/perf/history-prepend-profiler.js';
 import { getStreamingRenderInterval, shouldCommitStreamingMessage } from './scripts/tauri/perf/streaming-render-policy.js';
@@ -2338,6 +2338,7 @@ export async function sendTextareaMessage() {
     if (is_send_press) return;
     if (isExecutingCommandsFromChatInput) return;
 
+    chatScrollController.captureGenerationIntent();
     hideSwipeButtons(); //Swipe buttons must be hidden now, otherwise concurrent generations are possible.
 
     let routeToAgentMode = false;
@@ -2379,6 +2380,7 @@ export async function sendTextareaMessage() {
         }
         throw error;
     } finally {
+        chatScrollController.clearGenerationIntent();
         showSwipeButtons();
     }
 }
@@ -3468,6 +3470,7 @@ function formatGenerationTimer(gen_started, gen_finished, tokenCount, reasoningD
     return { timerValue, timerTitle };
 }
 
+const chatScrollIntent = createChatScrollIntentTracker();
 const chatScrollController = createChatScrollController({
     readViewport: () => chatElement[0],
     scrollToBottom: () => {
@@ -13187,6 +13190,14 @@ jQuery(async function () {
     }
 
     const chatElementScroll = document.getElementById('chat');
+    const markChatScrollIntent = () => chatScrollIntent.mark();
+    chatElementScroll.addEventListener('wheel', markChatScrollIntent, { passive: true });
+    chatElementScroll.addEventListener('touchmove', markChatScrollIntent, { passive: true });
+    chatElementScroll.addEventListener('pointermove', event => {
+        if (event.buttons !== 0) {
+            chatScrollIntent.mark();
+        }
+    }, { passive: true });
     const chatScrollHandler = function () {
         if (power_user.waifuMode) {
             scrollLock = true;
@@ -13204,7 +13215,10 @@ jQuery(async function () {
         if (!scrollLock && !scrollIsAtBottom) {
             scrollLock = true;
         }
-        chatScrollController.onViewportChanged();
+        chatScrollController.onViewportChanged({ userInitiated: chatScrollIntent.isActive() });
+        if (scrollIsAtBottom) {
+            chatScrollIntent.clear();
+        }
     };
     chatElementScroll.addEventListener('scroll', chatScrollHandler, { passive: true });
 
