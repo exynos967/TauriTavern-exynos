@@ -3253,7 +3253,7 @@ function getMessageTextHTML(message, { messageId = chat.indexOf(message) }) {
  * @returns {JQuery<HTMLElement>} The newly added message element
  */
 export function addOneMessage(mes, { type = undefined, insertAfter = null, scroll = true, insertBefore = null, forceId = null, showSwipes = true } = {}) {
-    const shouldScroll = scroll && chatScrollController.shouldFollowOutput();
+    const shouldScroll = scroll;
     // Callers push the new message to chat before calling addOneMessage
     const messageId = (() => {
         if (typeof forceId === 'number') {
@@ -3303,7 +3303,7 @@ export function addOneMessage(mes, { type = undefined, insertAfter = null, scrol
     if (showSwipes) refreshSwipeButtons();
     // Don't scroll if not inserting last
     if (!insertAfter && !insertBefore && shouldScroll) {
-        scrollChatToBottom({ waitForFrame: true });
+        scrollChatToBottom({ waitForFrame: true, force: true });
     }
 
     applyCharacterTagsToMessageDivs({ mesIds: messageId });

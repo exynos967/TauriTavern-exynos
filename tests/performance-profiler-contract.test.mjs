@@ -35,6 +35,8 @@ test('performance report exports generic operations and slow event listeners', a
     assert.match(source, /chatScrollDropped \+= pushBounded/);
     assert.match(source, /criticalSamples:\s*structuredClone\(state\.chatScrollCriticalSamples\)/);
     assert.match(source, /isCriticalChatScrollSample/);
+    assert.match(source, /CRITICAL_CHAT_SCROLL_CONTROLLER_EVENTS/);
+    assert.match(source, /Math\.abs\(Number\(sample\.requestedTop\) - Number\(sample\.geometry\.scrollHeight\)\) >= 80/);
     assert.match(source, /context:\s*getCurrentCaptureContext\(\)/);
     assert.match(source, /stack\.slice\(0, 8\)/);
     const chatScrollSanitizer = source.slice(

@@ -29,6 +29,15 @@ const MAX_RECENT_PHASE_CANDIDATES = 100;
 const SLOW_LISTENER_THRESHOLD_MS = 8;
 const SLOW_PHASE_THRESHOLD_MS = 8;
 const TOKEN_INVOKE_COMMANDS = new Set(['count_openai_tokens_batch', 'count_openai_token_prefixes']);
+const CRITICAL_CHAT_SCROLL_CONTROLLER_EVENTS = new Set([
+    'generation-intent-captured',
+    'generation-intent-cleared',
+    'generation-began',
+    'generation-ended',
+    'pending-cancelled',
+    'scroll-rejected',
+    'scroll-frame-rejected',
+]);
 
 const state = {
     capturing: false,
@@ -742,11 +751,17 @@ function sanitizeChatScrollSample(sample) {
 }
 
 function isCriticalChatScrollSample(sample) {
-    if (['scrollTop-write', 'scrollTo-call', 'dom-method-call', 'dom-content-write'].includes(sample.kind)) {
+    if (['scrollTo-call', 'dom-method-call', 'dom-content-write'].includes(sample.kind)) {
         return true;
     }
-    if (sample.kind === 'controller' && sample.event !== 'viewport-changed') {
-        return true;
+    if (sample.kind === 'controller') {
+        return CRITICAL_CHAT_SCROLL_CONTROLLER_EVENTS.has(sample.event);
+    }
+    if (sample.kind === 'scrollTop-write' && sample.phase === 'before') {
+        return sample.requestedTop === null
+            || sample.geometry?.scrollHeight === null
+            || sample.geometry?.scrollHeight === undefined
+            || Math.abs(Number(sample.requestedTop) - Number(sample.geometry.scrollHeight)) >= 80;
     }
 
     const previous = sample.previousGeometry ?? sample.before;

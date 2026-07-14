@@ -36,7 +36,8 @@ test('message insertion and generation delegate scrolling to one controller', as
     assert.match(source, /chatElementScroll\.addEventListener\('pointermove', event =>/);
     assert.match(source, /chatScrollController\.requestScroll\(\{ waitForFrame, force \}\)/);
     assert.match(source, /let position = chatElement\[0\]\.scrollHeight;\s*if \(power_user\.waifuMode\) \{\s*const lastMessage = chatElement\.find\('\.mes'\)\.last\(\);/);
-    assert.match(source, /const shouldScroll = scroll && chatScrollController\.shouldFollowOutput\(\)/);
+    assert.match(source, /const shouldScroll = scroll;/);
+    assert.match(source, /if \(!insertAfter && !insertBefore && shouldScroll\) \{\s*scrollChatToBottom\(\{ waitForFrame: true, force: true \}\)/);
     assert.match(source, /mediaScrollBehavior = chatScrollController\.shouldFollowOutput\(\)/);
     assert.match(source, /getHistoryPrependProfiler\(\)/);
     assert.match(source, /reportHistoryPrependBatch\(historyProfiler, \{/);
