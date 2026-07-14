@@ -15,7 +15,7 @@ import { replaceMesTextHtmlWithRuntimePolicy } from './scripts/tauri/message/mes
 import { getCodeHighlightCoordinator } from './scripts/tauri/perf/code-highlight-coordinator.js';
 import { isInlineDrawerContentOpen, setInlineDrawerContentOpen } from './scripts/tauri/perf/inline-drawer-motion.js';
 import { createPerformanceTrace } from './scripts/tauri/perf/performance-trace.js';
-import { createChatScrollController } from './scripts/tauri/perf/chat-scroll-controller.js';
+import { createChatScrollController, scrollViewportToBottom } from './scripts/tauri/perf/chat-scroll-controller.js';
 import { getMessageRenderBatches } from './scripts/tauri/perf/message-render-batches.js';
 import { getHistoryPrependProfiler, reportHistoryPrependBatch } from './scripts/tauri/perf/history-prepend-profiler.js';
 import { getStreamingRenderInterval, shouldCommitStreamingMessage } from './scripts/tauri/perf/streaming-render-policy.js';
@@ -3471,14 +3471,16 @@ function formatGenerationTimer(gen_started, gen_finished, tokenCount, reasoningD
 const chatScrollController = createChatScrollController({
     readViewport: () => chatElement[0],
     scrollToBottom: () => {
-        let position = chatElement[0].scrollHeight;
+        if (!power_user.waifuMode) {
+            scrollViewportToBottom(chatElement[0]);
+            return;
+        }
 
-        if (power_user.waifuMode) {
-            const lastMessage = chatElement.find('.mes').last();
-            if (lastMessage.length) {
-                const lastMessagePosition = lastMessage.position().top;
-                position = chatElement.scrollTop() + lastMessagePosition;
-            }
+        let position = chatElement[0].scrollHeight;
+        const lastMessage = chatElement.find('.mes').last();
+        if (lastMessage.length) {
+            const lastMessagePosition = lastMessage.position().top;
+            position = chatElement.scrollTop() + lastMessagePosition;
         }
 
         chatElement.scrollTop(position);
@@ -13204,7 +13206,7 @@ jQuery(async function () {
         if (!scrollLock && !scrollIsAtBottom) {
             scrollLock = true;
         }
-        chatScrollController.onViewportChanged();
+        chatScrollController.onViewportChanged(scrollIsAtBottom);
     };
     chatElementScroll.addEventListener('scroll', chatScrollHandler, { passive: true });
 

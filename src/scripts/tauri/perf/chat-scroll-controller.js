@@ -4,6 +4,11 @@ export function isChatViewportAtBottom({ scrollHeight, clientHeight, scrollTop }
     return Math.abs(Number(scrollHeight) - Number(clientHeight) - Number(scrollTop)) < threshold;
 }
 
+export function scrollViewportToBottom(viewport) {
+    // A large write is clamped to the scroll range without an explicit layout-reading scrollHeight access.
+    viewport.scrollTop = Number.MAX_SAFE_INTEGER;
+}
+
 export function createChatScrollController({
     readViewport,
     scrollToBottom,
@@ -39,8 +44,10 @@ export function createChatScrollController({
         endGeneration() {
             generationDepth = Math.max(0, generationDepth - 1);
         },
-        onViewportChanged() {
-            const atBottom = isAtBottom();
+        onViewportChanged(precomputedAtBottom) {
+            const atBottom = typeof precomputedAtBottom === 'boolean'
+                ? precomputedAtBottom
+                : isAtBottom();
             if (generationDepth === 0) {
                 generationFollowsOutput = atBottom;
             } else if (!atBottom) {
