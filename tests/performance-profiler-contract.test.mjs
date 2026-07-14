@@ -12,7 +12,8 @@ test('performance report exports generic operations and slow event listeners', a
     assert.match(source, /schemaVersion:\s*11/);
     assert.match(source, /operations:\s*structuredClone\(state\.operations\)/);
     assert.match(source, /slowListeners:\s*structuredClone\(state\.slowListeners\)/);
-    assert.match(source, /diagnostics:\s*runtimeDiagnostics\.snapshot\(\)/);
+    assert.match(source, /const diagnostics = runtimeDiagnostics\.snapshot\(\)/);
+    assert.match(source, /diagnostics,\s*\n/);
     assert.match(source, /__TAURITAVERN_PERF_EVENT_LISTENER__/);
     assert.match(source, /listenerProfiler:\s*getListenerProfilerSnapshot\(\)/);
     assert.match(source, /synchronousDurationMs/);
@@ -63,6 +64,8 @@ test('performance profiler starts by default and still supports explicit stop', 
     assert.match(profilerSource, /defaultEnabled:\s*true/);
     assert.match(profilerSource, /captureAutoStarted/);
     assert.match(profilerSource, /runtimeDiagnostics\.summary\(\)/);
+    assert.match(profilerSource, /frameSampleCallback:\s*sampleCurrentFrame/);
+    assert.doesNotMatch(profilerSource, /function startFrameSampler\(/);
     const renderStatusSource = profilerSource.slice(
         profilerSource.indexOf('function renderStatus()'),
         profilerSource.indexOf('function createUi()'),
@@ -79,6 +82,9 @@ test('performance profiler starts by default and still supports explicit stop', 
     assert.match(diagnosticsSource, /restoreInvoke\(\)/);
     assert.match(diagnosticsSource, /context:\s*readContext\(\)/);
     assert.match(diagnosticsSource, /computeThreadCpuSamples/);
+    assert.match(diagnosticsSource, /long-animation-frame/);
+    assert.match(diagnosticsSource, /forcedStyleAndLayoutDurationMs/);
+    assert.match(diagnosticsSource, /frameSamplerCallbackCount/);
 });
 
 test('performance traces cover history prepend and message redisplay operations', async () => {

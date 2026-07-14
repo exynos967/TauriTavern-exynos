@@ -65,8 +65,6 @@ const state = {
     captureAutoStarted: false,
     profilerOverheadMs: 0,
     profilerCallbackCount: 0,
-    rafId: null,
-    lastFrameAt: null,
     panel: null,
     status: null,
     toggleButton: null,
@@ -76,6 +74,7 @@ const state = {
 const runtimeDiagnostics = createRuntimeDiagnostics({
     nativeSampler: isTauri() ? () => invoke('get_perf_runtime_sample') : undefined,
     contextProvider: getCurrentCaptureContext,
+    frameSampleCallback: sampleCurrentFrame,
 });
 
 function now() {
@@ -371,29 +370,11 @@ function onMessageRendered() {
     }
 }
 
-function startFrameSampler() {
-    if (state.rafId !== null) {
-        return;
+function sampleCurrentFrame(delta) {
+    const samples = state.current?._frameSamples;
+    if (samples && samples.length < MAX_FRAME_SAMPLES) {
+        samples.push(delta);
     }
-
-    const step = timestamp => {
-        if (state.capturing) {
-            if (state.current && state.lastFrameAt !== null) {
-                const delta = timestamp - state.lastFrameAt;
-                const samples = state.current._frameSamples;
-                if (samples.length < MAX_FRAME_SAMPLES) {
-                    samples.push(delta);
-                }
-            }
-            state.lastFrameAt = timestamp;
-            state.rafId = requestAnimationFrame(step);
-        } else {
-            state.lastFrameAt = null;
-            state.rafId = null;
-        }
-    };
-
-    state.rafId = requestAnimationFrame(step);
 }
 
 function installLongTaskObserver() {
@@ -751,7 +732,6 @@ function startCapture({ autoStarted = false } = {}) {
     state.captureAutoStarted = Boolean(autoStarted);
     state.profilerOverheadMs = 0;
     state.profilerCallbackCount = 0;
-    state.lastFrameAt = null;
     installLongTaskObserver();
     installMeasureObserver();
     installInteractionObserver();
@@ -761,7 +741,6 @@ function startCapture({ autoStarted = false } = {}) {
     installStreamFormatProfiler();
     installHistoryPrependProfiler();
     installTokenInvokeProfiler();
-    startFrameSampler();
     runtimeDiagnostics.start();
     renderStatus();
 }
@@ -792,6 +771,7 @@ function stopCapture() {
 
 function snapshot() {
     const startedAt = now();
+    const diagnostics = runtimeDiagnostics.snapshot();
     const report = {
         schemaVersion: 11,
         exportedAt: new Date().toISOString(),
@@ -805,7 +785,11 @@ function snapshot() {
         records: structuredClone(state.records),
         chatLoads: structuredClone(state.chatLoads),
         slowInteractions: structuredClone(state.slowInteractions),
-        slowInteractionGroups: groupSlowInteractions(state.slowInteractions, state.longTaskSamples),
+        slowInteractionGroups: groupSlowInteractions(
+            state.slowInteractions,
+            state.longTaskSamples,
+            diagnostics.longAnimationFrames.samples,
+        ),
         longTaskProfiler: getLongTaskProfilerSnapshot(),
         operations: structuredClone(state.operations),
         unattributedTraces: structuredClone(state.unattributedTraces),
@@ -815,7 +799,7 @@ function snapshot() {
         streamFormatProfiler: getStreamFormatProfilerSnapshot(),
         historyPrependProfiler: getHistoryPrependProfilerSnapshot(),
         tokenInvokeProfiler: getTokenInvokeProfilerSnapshot(),
-        diagnostics: runtimeDiagnostics.snapshot(),
+        diagnostics,
         capture: getCaptureSnapshot(),
     };
     report.capture.snapshotDurationMs = finiteRound(now() - startedAt);

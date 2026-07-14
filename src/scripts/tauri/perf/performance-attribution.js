@@ -61,7 +61,7 @@ export function linkLongTaskPhase(longTask, phase) {
     return true;
 }
 
-export function groupSlowInteractions(interactions, longTasks = []) {
+export function groupSlowInteractions(interactions, longTasks = [], longAnimationFrames = []) {
     const groups = new Map();
     for (const interaction of interactions ?? []) {
         const startTime = Number(interaction?.startTime);
@@ -88,6 +88,14 @@ export function groupSlowInteractions(interactions, longTasks = []) {
             longTaskCount: 0,
             longTaskTotalMs: 0,
             maxLongTaskMs: 0,
+            longAnimationFrameCount: 0,
+            longAnimationFrameTotalMs: 0,
+            maxLongAnimationFrameMs: 0,
+            blockingDurationMs: 0,
+            renderDurationMs: 0,
+            forcedStyleAndLayoutDurationMs: 0,
+            longAnimationFrameIds: [],
+            scripts: [],
             generationTraceRunIds: [],
             stages: [],
         };
@@ -130,6 +138,54 @@ export function groupSlowInteractions(interactions, longTasks = []) {
                 group.generationTraceRunIds.push(longTask.generationTraceRunId);
             }
         }
+        const scripts = new Map();
+        for (const frame of longAnimationFrames ?? []) {
+            if (!overlaps(group, frame)) {
+                continue;
+            }
+            group.longAnimationFrameCount += 1;
+            group.longAnimationFrameTotalMs = round(group.longAnimationFrameTotalMs + (Number(frame.durationMs) || 0));
+            group.maxLongAnimationFrameMs = round(Math.max(group.maxLongAnimationFrameMs, Number(frame.durationMs) || 0));
+            group.blockingDurationMs = round(group.blockingDurationMs + (Number(frame.blockingDurationMs) || 0));
+            group.renderDurationMs = round(group.renderDurationMs + (Number(frame.renderDurationMs) || 0));
+            group.forcedStyleAndLayoutDurationMs = round(
+                group.forcedStyleAndLayoutDurationMs + (Number(frame.forcedStyleAndLayoutDurationMs) || 0),
+            );
+            if (frame.id !== null && frame.id !== undefined && !group.longAnimationFrameIds.includes(frame.id)) {
+                group.longAnimationFrameIds.push(frame.id);
+            }
+            for (const script of frame.scripts ?? []) {
+                const key = [
+                    script.invokerType,
+                    script.invoker,
+                    script.sourceUrl,
+                    script.sourceFunctionName,
+                    script.sourceCharPosition,
+                ].join('|');
+                const aggregate = scripts.get(key) ?? {
+                    key,
+                    invokerType: script.invokerType || null,
+                    invoker: script.invoker || null,
+                    sourceUrl: script.sourceUrl || null,
+                    sourceFunctionName: script.sourceFunctionName || null,
+                    sourceCharPosition: script.sourceCharPosition ?? null,
+                    count: 0,
+                    totalDurationMs: 0,
+                    maxDurationMs: 0,
+                    forcedStyleAndLayoutDurationMs: 0,
+                };
+                aggregate.count += 1;
+                aggregate.totalDurationMs = round(aggregate.totalDurationMs + (Number(script.durationMs) || 0));
+                aggregate.maxDurationMs = round(Math.max(aggregate.maxDurationMs, Number(script.durationMs) || 0));
+                aggregate.forcedStyleAndLayoutDurationMs = round(
+                    aggregate.forcedStyleAndLayoutDurationMs + (Number(script.forcedStyleAndLayoutDurationMs) || 0),
+                );
+                scripts.set(key, aggregate);
+            }
+        }
+        group.scripts = Array.from(scripts.values())
+            .sort((left, right) => right.totalDurationMs - left.totalDurationMs)
+            .slice(0, MAX_LINKED_PHASES);
         delete group._endedAt;
     }
     return result;

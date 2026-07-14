@@ -4,6 +4,8 @@ const MAX_INTERACTIONS = 200;
 const MAX_NETWORK_REQUESTS = 200;
 const MAX_INVOKES = 200;
 const MAX_HEALTH_SAMPLES = 900;
+const MAX_LONG_ANIMATION_FRAMES = 200;
+const MAX_SCRIPTS_PER_LONG_ANIMATION_FRAME = 20;
 const HEALTH_SAMPLE_INTERVAL_MS = 1000;
 const EVENT_LOOP_PROBE_INTERVAL_MS = 250;
 const LONG_FRAME_THRESHOLD_MS = 50;
@@ -27,6 +29,78 @@ function pushBounded(collection, value, limit) {
     if (collection.length > limit) {
         collection.splice(0, collection.length - limit);
     }
+}
+
+function boundedString(value, limit = 300) {
+    return String(value ?? '').slice(0, limit);
+}
+
+function sanitizeSourceUrl(value) {
+    const sourceUrl = boundedString(value);
+    if (!sourceUrl) {
+        return '';
+    }
+
+    try {
+        const url = new URL(sourceUrl, globalThis.location?.href);
+        return url.origin === globalThis.location?.origin
+            ? url.pathname
+            : `${url.origin}${url.pathname}`;
+    } catch {
+        return sourceUrl.split(/[?#]/, 1)[0];
+    }
+}
+
+function serializeLongAnimationFrameScript(script) {
+    return {
+        startTime: round(script?.startTime),
+        durationMs: round(script?.duration),
+        executionStart: round(script?.executionStart),
+        forcedStyleAndLayoutDurationMs: round(script?.forcedStyleAndLayoutDuration),
+        pauseDurationMs: round(script?.pauseDuration),
+        invoker: boundedString(script?.invoker || script?.name),
+        invokerType: boundedString(script?.invokerType || script?.type, 100),
+        sourceUrl: sanitizeSourceUrl(script?.sourceURL),
+        sourceFunctionName: boundedString(script?.sourceFunctionName),
+        sourceCharPosition: Number.isFinite(Number(script?.sourceCharPosition))
+            ? Number(script.sourceCharPosition)
+            : null,
+    };
+}
+
+export function serializeLongAnimationFrame(entry, { id = null, context = null } = {}) {
+    const startTime = Number(entry?.startTime) || 0;
+    const durationMs = Math.max(0, Number(entry?.duration) || 0);
+    const endedAt = startTime + durationMs;
+    const renderStart = Number(entry?.renderStart) || 0;
+    const styleAndLayoutStart = Number(entry?.styleAndLayoutStart) || 0;
+    const allScripts = Array.from(entry?.scripts ?? [], serializeLongAnimationFrameScript);
+    const forcedStyleAndLayoutDurationMs = allScripts.reduce(
+        (total, script) => total + (Number(script.forcedStyleAndLayoutDurationMs) || 0),
+        0,
+    );
+    const scripts = allScripts
+        .sort((left, right) => (right.durationMs ?? 0) - (left.durationMs ?? 0))
+        .slice(0, MAX_SCRIPTS_PER_LONG_ANIMATION_FRAME);
+
+    return {
+        id,
+        startTime: round(startTime),
+        durationMs: round(durationMs),
+        blockingDurationMs: round(entry?.blockingDuration),
+        firstUIEventTimestamp: round(entry?.firstUIEventTimestamp),
+        renderStart: renderStart > 0 ? round(renderStart) : null,
+        renderDurationMs: renderStart > 0 ? round(Math.max(0, endedAt - renderStart)) : 0,
+        styleAndLayoutStart: styleAndLayoutStart > 0 ? round(styleAndLayoutStart) : null,
+        styleAndLayoutDurationMs: styleAndLayoutStart > 0
+            ? round(Math.max(0, endedAt - styleAndLayoutStart))
+            : 0,
+        forcedStyleAndLayoutDurationMs: round(forcedStyleAndLayoutDurationMs),
+        scriptCount: allScripts.length,
+        droppedScripts: Math.max(0, allScripts.length - scripts.length),
+        scripts,
+        context: context && typeof context === 'object' ? structuredClone(context) : null,
+    };
 }
 
 function describeRequest(input, init) {
@@ -109,7 +183,7 @@ export function computeThreadCpuSamples(sample, previous) {
     });
 }
 
-export function createRuntimeDiagnostics({ nativeSampler, contextProvider } = {}) {
+export function createRuntimeDiagnostics({ nativeSampler, contextProvider, frameSampleCallback } = {}) {
     const state = {
         running: false,
         sessionId: 0,
@@ -118,10 +192,13 @@ export function createRuntimeDiagnostics({ nativeSampler, contextProvider } = {}
         networkRequests: [],
         invokes: [],
         healthSamples: [],
+        longAnimationFrames: [],
         capabilities: {
             eventTiming: Array.isArray(globalThis.PerformanceObserver?.supportedEntryTypes)
                 && globalThis.PerformanceObserver.supportedEntryTypes.includes('event'),
             longTask: false,
+            longAnimationFrame: Array.isArray(globalThis.PerformanceObserver?.supportedEntryTypes)
+                && globalThis.PerformanceObserver.supportedEntryTypes.includes('long-animation-frame'),
             memory: Boolean(globalThis.performance?.memory),
             nativeSample: typeof nativeSampler === 'function',
         },
@@ -150,6 +227,13 @@ export function createRuntimeDiagnostics({ nativeSampler, contextProvider } = {}
         nextEventLoopProbeAt: null,
         nativeSamplePending: false,
         longTaskObserver: null,
+        longAnimationFrameObserver: null,
+        longAnimationFrameObserved: 0,
+        longAnimationFrameDropped: 0,
+        nextLongAnimationFrameId: 1,
+        frameSamplerCallbackCount: 0,
+        frameSamplerSampleCount: 0,
+        frameSamplerOverheadMs: 0,
         originalFetch: null,
         wrappedFetch: null,
         invokeOwner: null,
@@ -251,17 +335,32 @@ export function createRuntimeDiagnostics({ nativeSampler, contextProvider } = {}
             return;
         }
 
-        if (state.lastFrameAt !== null) {
-            const delta = timestamp - state.lastFrameAt;
-            state.frameCount += 1;
-            state.maxFrameMs = Math.max(state.maxFrameMs, delta);
-            state.frameDelayMs += Math.max(0, delta - (1000 / 60));
-            if (delta >= LONG_FRAME_THRESHOLD_MS) {
-                state.longFrames += 1;
+        const callbackStartedAt = now();
+        try {
+            if (state.lastFrameAt !== null) {
+                const delta = timestamp - state.lastFrameAt;
+                state.frameCount += 1;
+                state.frameSamplerSampleCount += 1;
+                state.maxFrameMs = Math.max(state.maxFrameMs, delta);
+                state.frameDelayMs += Math.max(0, delta - (1000 / 60));
+                if (delta >= LONG_FRAME_THRESHOLD_MS) {
+                    state.longFrames += 1;
+                }
+
+                if (typeof frameSampleCallback === 'function') {
+                    try {
+                        frameSampleCallback(delta);
+                    } catch {
+                        // Diagnostics consumers must never affect frame sampling.
+                    }
+                }
             }
+            state.lastFrameAt = timestamp;
+        } finally {
+            state.frameSamplerCallbackCount += 1;
+            state.frameSamplerOverheadMs += Math.max(0, now() - callbackStartedAt);
+            state.rafId = state.running ? requestAnimationFrame(frameStep) : null;
         }
-        state.lastFrameAt = timestamp;
-        state.rafId = requestAnimationFrame(frameStep);
     }
 
     function onClick(event) {
@@ -327,6 +426,32 @@ export function createRuntimeDiagnostics({ nativeSampler, contextProvider } = {}
             state.capabilities.longTask = true;
         } catch {
             state.longTaskObserver = null;
+        }
+    }
+
+    function installLongAnimationFrameObserver() {
+        if (!state.capabilities.longAnimationFrame || typeof PerformanceObserver !== 'function') {
+            return;
+        }
+
+        try {
+            state.longAnimationFrameObserver = new PerformanceObserver(list => {
+                for (const entry of list.getEntries()) {
+                    state.longAnimationFrameObserved += 1;
+                    const previousLength = state.longAnimationFrames.length;
+                    pushBounded(state.longAnimationFrames, serializeLongAnimationFrame(entry, {
+                        id: state.nextLongAnimationFrameId++,
+                        context: readContext(),
+                    }), MAX_LONG_ANIMATION_FRAMES);
+                    if (previousLength === MAX_LONG_ANIMATION_FRAMES) {
+                        state.longAnimationFrameDropped += 1;
+                    }
+                }
+            });
+            state.longAnimationFrameObserver.observe({ type: 'long-animation-frame', buffered: false });
+        } catch {
+            state.longAnimationFrameObserver = null;
+            state.capabilities.longAnimationFrame = false;
         }
     }
 
@@ -458,10 +583,14 @@ export function createRuntimeDiagnostics({ nativeSampler, contextProvider } = {}
         state.lastHealthAt = state.startedAt;
         state.lastFrameAt = null;
         state.nativeThreadSample = null;
+        state.frameSamplerCallbackCount = 0;
+        state.frameSamplerSampleCount = 0;
+        state.frameSamplerOverheadMs = 0;
         state.nextEventLoopProbeAt = now() + EVENT_LOOP_PROBE_INTERVAL_MS;
         resetWindow();
         globalThis.document?.addEventListener('click', onClick, true);
         installLongTaskObserver();
+        installLongAnimationFrameObserver();
         installFetchProfiler();
         installInvokeProfiler();
         state.eventLoopTimer = globalThis.setInterval(() => {
@@ -487,6 +616,8 @@ export function createRuntimeDiagnostics({ nativeSampler, contextProvider } = {}
         globalThis.document?.removeEventListener('click', onClick, true);
         state.longTaskObserver?.disconnect();
         state.longTaskObserver = null;
+        state.longAnimationFrameObserver?.disconnect();
+        state.longAnimationFrameObserver = null;
         globalThis.clearInterval(state.healthTimer);
         globalThis.clearInterval(state.eventLoopTimer);
         state.healthTimer = null;
@@ -504,6 +635,10 @@ export function createRuntimeDiagnostics({ nativeSampler, contextProvider } = {}
         state.networkRequests = [];
         state.invokes = [];
         state.healthSamples = [];
+        state.longAnimationFrames = [];
+        state.longAnimationFrameObserved = 0;
+        state.longAnimationFrameDropped = 0;
+        state.nextLongAnimationFrameId = 1;
         state.nativeThreadSample = null;
         state.networkInFlightMax = state.networkInFlight;
         state.invokeInFlightMax = state.invokeInFlight;
@@ -513,7 +648,20 @@ export function createRuntimeDiagnostics({ nativeSampler, contextProvider } = {}
         return {
             capabilities: { ...state.capabilities },
             startedAt: round(state.startedAt),
+            frameSampler: {
+                sharedConsumer: typeof frameSampleCallback === 'function',
+                callbackCount: state.frameSamplerCallbackCount,
+                sampleCount: state.frameSamplerSampleCount,
+                callbackOverheadMs: round(state.frameSamplerOverheadMs),
+            },
             interactions: structuredClone(state.interactions),
+            longAnimationFrames: {
+                observed: state.longAnimationFrameObserved,
+                stored: state.longAnimationFrames.length,
+                dropped: state.longAnimationFrameDropped,
+                maxScriptsPerFrame: MAX_SCRIPTS_PER_LONG_ANIMATION_FRAME,
+                samples: structuredClone(state.longAnimationFrames),
+            },
             network: {
                 inFlight: state.networkInFlight,
                 inFlightMax: state.networkInFlightMax,
