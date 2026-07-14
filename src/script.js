@@ -16,6 +16,7 @@ import { getCodeHighlightCoordinator } from './scripts/tauri/perf/code-highlight
 import { isInlineDrawerContentOpen, setInlineDrawerContentOpen } from './scripts/tauri/perf/inline-drawer-motion.js';
 import { createPerformanceTrace } from './scripts/tauri/perf/performance-trace.js';
 import { createChatScrollController, createChatScrollIntentTracker } from './scripts/tauri/perf/chat-scroll-controller.js';
+import { installChatScrollTrace, readChatScrollGeometry, reportChatScrollSample } from './scripts/tauri/perf/chat-scroll-trace.js';
 import { getMessageRenderBatches } from './scripts/tauri/perf/message-render-batches.js';
 import { getHistoryPrependProfiler, reportHistoryPrependBatch } from './scripts/tauri/perf/history-prepend-profiler.js';
 import { getStreamingRenderInterval, shouldCommitStreamingMessage } from './scripts/tauri/perf/streaming-render-policy.js';
@@ -3489,6 +3490,7 @@ const chatScrollController = createChatScrollController({
     requestFrame: callback => requestAnimationFrame(callback),
     cancelFrame: id => cancelAnimationFrame(id),
     canAutoScroll: () => power_user.auto_scroll_chat_to_bottom,
+    trace: sample => reportChatScrollSample('controller', sample),
 });
 
 /**
@@ -13190,12 +13192,17 @@ jQuery(async function () {
     }
 
     const chatElementScroll = document.getElementById('chat');
-    const markChatScrollIntent = () => chatScrollIntent.mark();
-    chatElementScroll.addEventListener('wheel', markChatScrollIntent, { passive: true });
-    chatElementScroll.addEventListener('touchmove', markChatScrollIntent, { passive: true });
+    installChatScrollTrace(chatElementScroll);
+    let lastChatScrollIntentSource = null;
+    const markChatScrollIntent = source => {
+        lastChatScrollIntentSource = source;
+        chatScrollIntent.mark();
+    };
+    chatElementScroll.addEventListener('wheel', () => markChatScrollIntent('wheel'), { passive: true });
+    chatElementScroll.addEventListener('touchmove', () => markChatScrollIntent('touchmove'), { passive: true });
     chatElementScroll.addEventListener('pointermove', event => {
         if (event.buttons !== 0) {
-            chatScrollIntent.mark();
+            markChatScrollIntent('pointermove');
         }
     }, { passive: true });
     const chatScrollHandler = function () {
@@ -13215,9 +13222,16 @@ jQuery(async function () {
         if (!scrollLock && !scrollIsAtBottom) {
             scrollLock = true;
         }
-        chatScrollController.onViewportChanged({ userInitiated: chatScrollIntent.isActive() });
+        const userInitiated = chatScrollIntent.isActive();
+        reportChatScrollSample('scroll-event', {
+            source: userInitiated ? lastChatScrollIntentSource : 'programmatic-or-layout',
+            userInitiated,
+            geometry: readChatScrollGeometry(chatElementScroll),
+        });
+        chatScrollController.onViewportChanged({ userInitiated });
         if (scrollIsAtBottom) {
             chatScrollIntent.clear();
+            lastChatScrollIntentSource = null;
         }
     };
     chatElementScroll.addEventListener('scroll', chatScrollHandler, { passive: true });

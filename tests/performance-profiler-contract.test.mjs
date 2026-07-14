@@ -28,6 +28,17 @@ test('performance report exports generic operations and slow event listeners', a
     assert.match(source, /__TAURITAVERN_PERF_STREAM_FORMAT__/);
     assert.match(source, /historyPrependProfiler:\s*getHistoryPrependProfilerSnapshot\(\)/);
     assert.match(source, /__TAURITAVERN_PERF_HISTORY_PREPEND__/);
+    assert.match(source, /chatScrollProfiler:\s*getChatScrollProfilerSnapshot\(\)/);
+    assert.match(source, /__TAURITAVERN_PERF_CHAT_SCROLL__/);
+    assert.match(source, /MAX_CHAT_SCROLL_SAMPLES/);
+    assert.match(source, /chatScrollDropped \+= pushBounded/);
+    assert.match(source, /context:\s*getCurrentCaptureContext\(\)/);
+    assert.match(source, /stack\.slice\(0, 8\)/);
+    const chatScrollSanitizer = source.slice(
+        source.indexOf('function sanitizeChatScrollSample('),
+        source.indexOf('function installChatScrollProfiler('),
+    );
+    assert.doesNotMatch(chatScrollSanitizer, /textContent|innerHTML|outerHTML|messageText|chatText/);
     assert.match(source, /tokenInvokeProfiler:\s*getTokenInvokeProfilerSnapshot\(\)/);
     assert.match(source, /slowInteractionGroups:\s*groupSlowInteractions/);
     assert.match(source, /longTaskProfiler:\s*getLongTaskProfilerSnapshot\(\)/);
@@ -108,4 +119,19 @@ test('performance traces cover history prepend and message redisplay operations'
     assert.match(source, /measure\('selection-sync'/);
     assert.match(source, /measureAsync\('chat-created-listeners'/);
     assert.match(source, /measureAsync\('first-message-listeners'/);
+});
+
+test('chat scroll diagnostics observe only the chat instance and controller decisions', async () => {
+    const [scriptSource, traceSource] = await Promise.all([
+        readFile(path.join(REPO_ROOT, 'src/script.js'), 'utf8'),
+        readFile(path.join(REPO_ROOT, 'src/scripts/tauri/perf/chat-scroll-trace.js'), 'utf8'),
+    ]);
+
+    assert.match(scriptSource, /installChatScrollTrace\(chatElementScroll\)/);
+    assert.match(scriptSource, /reportChatScrollSample\('scroll-event'/);
+    assert.match(scriptSource, /trace:\s*sample => reportChatScrollSample\('controller', sample\)/);
+    assert.match(traceSource, /Object\.defineProperty\(element, 'scrollTop'/);
+    assert.match(traceSource, /Object\.defineProperty\(element, 'scrollTo'/);
+    assert.doesNotMatch(traceSource, /prototype\.scrollTop|Element\.prototype|HTMLElement\.prototype/);
+    assert.doesNotMatch(traceSource, /textContent|innerHTML|outerHTML/);
 });

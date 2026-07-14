@@ -7,7 +7,7 @@ import {
     isChatViewportAtBottom,
 } from '../src/scripts/tauri/perf/chat-scroll-controller.js';
 
-function createHarness(viewport = { scrollHeight: 1000, clientHeight: 400, scrollTop: 600 }) {
+function createHarness(viewport = { scrollHeight: 1000, clientHeight: 400, scrollTop: 600 }, { trace } = {}) {
     const frames = new Map();
     const cancelled = [];
     let nextFrameId = 1;
@@ -27,6 +27,7 @@ function createHarness(viewport = { scrollHeight: 1000, clientHeight: 400, scrol
             cancelled.push(id);
             frames.delete(id);
         },
+        trace,
     });
     return {
         controller,
@@ -186,4 +187,54 @@ test('explicit navigation can scroll while content following is disabled', () =>
     assert.equal(harness.controller.requestScroll(), false);
     assert.equal(harness.controller.requestScroll({ force: true }), true);
     assert.equal(harness.scrolls, 1);
+});
+
+test('controller trace records decisions without additional viewport reads', () => {
+    const events = [];
+    let viewportReads = 0;
+    const viewport = { scrollHeight: 1000, clientHeight: 400, scrollTop: 600 };
+    const controller = createChatScrollController({
+        readViewport: () => {
+            viewportReads += 1;
+            return viewport;
+        },
+        scrollToBottom: () => {},
+        requestFrame: callback => {
+            callback();
+            return 1;
+        },
+        cancelFrame: () => {},
+        trace: sample => events.push(sample),
+    });
+
+    controller.captureGenerationIntent();
+    controller.beginGeneration();
+    controller.onViewportChanged({ userInitiated: false });
+    controller.requestScroll();
+    controller.endGeneration();
+
+    assert.equal(viewportReads, 2);
+    assert.deepEqual(events.map(sample => sample.event), [
+        'generation-intent-captured',
+        'generation-began',
+        'viewport-changed',
+        'scroll-executing',
+        'scroll-executed',
+        'generation-ended',
+    ]);
+    assert.equal(events[2].atBottom, true);
+    assert.equal(events[2].userInitiated, false);
+});
+
+test('controller trace failures do not affect scroll decisions', () => {
+    const harness = createHarness(undefined, {
+        trace: () => {
+            throw new Error('trace failure');
+        },
+    });
+
+    harness.controller.beginGeneration();
+    assert.equal(harness.controller.requestScroll(), true);
+    assert.equal(harness.scrolls, 1);
+    harness.controller.endGeneration();
 });

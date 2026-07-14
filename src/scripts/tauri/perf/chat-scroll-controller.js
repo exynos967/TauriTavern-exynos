@@ -31,11 +31,27 @@ export function createChatScrollController({
     cancelFrame,
     canAutoScroll = () => true,
     bottomThreshold = DEFAULT_BOTTOM_THRESHOLD,
+    trace = () => {},
 }) {
     let generationDepth = 0;
     let generationFollowsOutput = true;
     let pendingGenerationFollowsOutput = null;
     let pendingFrame = null;
+
+    const report = (event, detail = {}) => {
+        try {
+            trace({
+                event,
+                generationDepth,
+                generationFollowsOutput,
+                hasPendingGenerationIntent: typeof pendingGenerationFollowsOutput === 'boolean',
+                hasPendingFrame: pendingFrame !== null,
+                ...detail,
+            });
+        } catch {
+            // Diagnostics must never affect chat scrolling.
+        }
+    };
 
     const cancelPending = () => {
         if (pendingFrame === null) {
@@ -43,6 +59,7 @@ export function createChatScrollController({
         }
         cancelFrame(pendingFrame);
         pendingFrame = null;
+        report('pending-cancelled');
     };
 
     const isAtBottom = () => isChatViewportAtBottom(readViewport(), bottomThreshold);
@@ -50,10 +67,12 @@ export function createChatScrollController({
     return Object.freeze({
         captureGenerationIntent() {
             pendingGenerationFollowsOutput = isAtBottom();
+            report('generation-intent-captured', { atBottom: pendingGenerationFollowsOutput });
             return pendingGenerationFollowsOutput;
         },
         clearGenerationIntent() {
             pendingGenerationFollowsOutput = null;
+            report('generation-intent-cleared');
         },
         beginGeneration() {
             if (generationDepth === 0) {
@@ -66,9 +85,11 @@ export function createChatScrollController({
                 }
             }
             generationDepth += 1;
+            report('generation-began');
         },
         endGeneration() {
             generationDepth = Math.max(0, generationDepth - 1);
+            report('generation-ended');
         },
         onViewportChanged({ userInitiated = true } = {}) {
             const atBottom = isAtBottom();
@@ -78,25 +99,43 @@ export function createChatScrollController({
                 generationFollowsOutput = false;
                 cancelPending();
             }
+            report('viewport-changed', { atBottom, userInitiated: Boolean(userInitiated) });
         },
         requestScroll({ waitForFrame = false, force = false } = {}) {
-            if (!canAutoScroll() || (!force && !generationFollowsOutput)) {
+            const autoScrollEnabled = canAutoScroll();
+            if (!autoScrollEnabled || (!force && !generationFollowsOutput)) {
                 cancelPending();
+                report('scroll-rejected', {
+                    autoScrollEnabled,
+                    force: Boolean(force),
+                    waitForFrame: Boolean(waitForFrame),
+                });
                 return false;
             }
 
             cancelPending();
             if (!waitForFrame) {
+                report('scroll-executing', { force: Boolean(force), waitForFrame: false });
                 scrollToBottom();
+                report('scroll-executed', { force: Boolean(force), waitForFrame: false });
                 return true;
             }
 
             pendingFrame = requestFrame(() => {
                 pendingFrame = null;
-                if (canAutoScroll() && (force || generationFollowsOutput)) {
+                const frameAutoScrollEnabled = canAutoScroll();
+                if (frameAutoScrollEnabled && (force || generationFollowsOutput)) {
+                    report('scroll-executing', { force: Boolean(force), waitForFrame: true });
                     scrollToBottom();
+                    report('scroll-executed', { force: Boolean(force), waitForFrame: true });
+                } else {
+                    report('scroll-frame-rejected', {
+                        autoScrollEnabled: frameAutoScrollEnabled,
+                        force: Boolean(force),
+                    });
                 }
             });
+            report('scroll-scheduled', { force: Boolean(force), waitForFrame: true });
             return true;
         },
         cancelPending,

@@ -18,6 +18,7 @@ const MAX_UNATTRIBUTED_TRACES = 50;
 const MAX_AUTOMATION_SAMPLES = 300;
 const MAX_STREAM_FORMAT_SAMPLES = 300;
 const MAX_HISTORY_PREPEND_SAMPLES = 200;
+const MAX_CHAT_SCROLL_SAMPLES = 600;
 const MAX_TOKEN_INVOKE_SAMPLES = 300;
 const MAX_SLOW_LISTENERS = 100;
 const MAX_LONG_TASK_SAMPLES = 300;
@@ -49,6 +50,9 @@ const state = {
     historyPrependSamples: [],
     historyPrependObserved: 0,
     historyPrependDropped: 0,
+    chatScrollSamples: [],
+    chatScrollObserved: 0,
+    chatScrollDropped: 0,
     tokenInvokeSamples: [],
     tokenInvokeObserved: 0,
     tokenInvokeDropped: 0,
@@ -643,6 +647,78 @@ function getHistoryPrependProfilerSnapshot() {
     };
 }
 
+function sanitizeChatScrollGeometry(geometry) {
+    if (!geometry || typeof geometry !== 'object') {
+        return null;
+    }
+
+    return {
+        scrollTop: finiteRound(geometry.scrollTop),
+        scrollHeight: finiteRound(geometry.scrollHeight),
+        clientHeight: finiteRound(geometry.clientHeight),
+        bottomGap: finiteRound(geometry.bottomGap),
+        atBottom: typeof geometry.atBottom === 'boolean' ? geometry.atBottom : null,
+        messageCount: Number.isFinite(Number(geometry.messageCount)) ? Number(geometry.messageCount) : null,
+    };
+}
+
+function sanitizeChatScrollSample(sample) {
+    const request = sample.request && typeof sample.request === 'object' ? {
+        left: finiteRound(sample.request.left),
+        top: finiteRound(sample.request.top),
+        behavior: sample.request.behavior ? String(sample.request.behavior).slice(0, 32) : null,
+    } : null;
+    const stack = Array.isArray(sample.stack)
+        ? sample.stack.slice(0, 8).map(line => String(line).slice(0, 240))
+        : null;
+
+    return {
+        kind: String(sample.kind ?? 'unknown').slice(0, 64),
+        event: sample.event ? String(sample.event).slice(0, 64) : null,
+        phase: sample.phase ? String(sample.phase).slice(0, 32) : null,
+        source: sample.source ? String(sample.source).slice(0, 64) : null,
+        requestedTop: finiteRound(sample.requestedTop),
+        request,
+        before: sanitizeChatScrollGeometry(sample.before),
+        previousGeometry: sanitizeChatScrollGeometry(sample.previousGeometry),
+        geometry: sanitizeChatScrollGeometry(sample.geometry),
+        stack,
+        generationDepth: Number.isFinite(Number(sample.generationDepth)) ? Number(sample.generationDepth) : null,
+        generationFollowsOutput: typeof sample.generationFollowsOutput === 'boolean' ? sample.generationFollowsOutput : null,
+        hasPendingGenerationIntent: typeof sample.hasPendingGenerationIntent === 'boolean' ? sample.hasPendingGenerationIntent : null,
+        hasPendingFrame: typeof sample.hasPendingFrame === 'boolean' ? sample.hasPendingFrame : null,
+        atBottom: typeof sample.atBottom === 'boolean' ? sample.atBottom : null,
+        userInitiated: typeof sample.userInitiated === 'boolean' ? sample.userInitiated : null,
+        autoScrollEnabled: typeof sample.autoScrollEnabled === 'boolean' ? sample.autoScrollEnabled : null,
+        force: typeof sample.force === 'boolean' ? sample.force : null,
+        waitForFrame: typeof sample.waitForFrame === 'boolean' ? sample.waitForFrame : null,
+        context: getCurrentCaptureContext(),
+        observedAt: finiteRound(now()),
+    };
+}
+
+function installChatScrollProfiler() {
+    globalThis.__TAURITAVERN_PERF_CHAT_SCROLL__ = sample => measureProfilerWork(() => {
+        if (state.capturing && sample && typeof sample === 'object') {
+            state.chatScrollObserved += 1;
+            state.chatScrollDropped += pushBounded(
+                state.chatScrollSamples,
+                sanitizeChatScrollSample(sample),
+                MAX_CHAT_SCROLL_SAMPLES,
+            );
+        }
+    });
+}
+
+function getChatScrollProfilerSnapshot() {
+    return {
+        observed: state.chatScrollObserved,
+        stored: state.chatScrollSamples.length,
+        dropped: state.chatScrollDropped,
+        samples: structuredClone(state.chatScrollSamples),
+    };
+}
+
 function installTokenInvokeProfiler() {
     globalThis.__TAURITAVERN_PERF_INVOKE_BROKER__ = sample => measureProfilerWork(() => {
         if (state.capturing && sample && TOKEN_INVOKE_COMMANDS.has(sample.command)) {
@@ -740,6 +816,7 @@ function startCapture({ autoStarted = false } = {}) {
     installAutomationProfiler();
     installStreamFormatProfiler();
     installHistoryPrependProfiler();
+    installChatScrollProfiler();
     installTokenInvokeProfiler();
     runtimeDiagnostics.start();
     renderStatus();
@@ -758,6 +835,7 @@ function stopCapture() {
     delete globalThis.__TAURITAVERN_PERF_AUTOMATION__;
     delete globalThis.__TAURITAVERN_PERF_STREAM_FORMAT__;
     delete globalThis.__TAURITAVERN_PERF_HISTORY_PREPEND__;
+    delete globalThis.__TAURITAVERN_PERF_CHAT_SCROLL__;
     delete globalThis.__TAURITAVERN_PERF_INVOKE_BROKER__;
     state.observer?.disconnect();
     state.observer = null;
@@ -798,6 +876,7 @@ function snapshot() {
         automationProfiler: getAutomationProfilerSnapshot(),
         streamFormatProfiler: getStreamFormatProfilerSnapshot(),
         historyPrependProfiler: getHistoryPrependProfilerSnapshot(),
+        chatScrollProfiler: getChatScrollProfilerSnapshot(),
         tokenInvokeProfiler: getTokenInvokeProfilerSnapshot(),
         diagnostics,
         capture: getCaptureSnapshot(),
@@ -931,6 +1010,9 @@ function createUi() {
         state.historyPrependSamples = [];
         state.historyPrependObserved = 0;
         state.historyPrependDropped = 0;
+        state.chatScrollSamples = [];
+        state.chatScrollObserved = 0;
+        state.chatScrollDropped = 0;
         state.tokenInvokeSamples = [];
         state.tokenInvokeObserved = 0;
         state.tokenInvokeDropped = 0;
