@@ -25,14 +25,14 @@ test('message insertion and generation delegate scrolling to one controller', as
     assert.match(source, /const chatScrollController = createChatScrollController\(/);
     assert.match(source, /async function GenerateInternal\([^]*chatScrollController\.beginGeneration\(\)/);
     assert.match(source, /finally \{\s*chatScrollController\.endGeneration\(\)/);
-    assert.match(source, /chatScrollController\.onViewportChanged\(scrollIsAtBottom\)/);
+    assert.match(source, /chatScrollController\.onViewportChanged\(\)/);
     assert.match(source, /chatScrollController\.requestScroll\(\{ waitForFrame, force \}\)/);
-    assert.match(source, /if \(!power_user\.waifuMode\) \{\s*scrollViewportToBottom\(chatElement\[0\]\);\s*return;/);
-    assert.match(source, /let position = chatElement\[0\]\.scrollHeight;\s*const lastMessage = chatElement\.find\('\.mes'\)\.last\(\);/);
+    assert.match(source, /let position = chatElement\[0\]\.scrollHeight;\s*if \(power_user\.waifuMode\) \{\s*const lastMessage = chatElement\.find\('\.mes'\)\.last\(\);/);
     assert.match(source, /const shouldScroll = scroll && chatScrollController\.shouldFollowOutput\(\)/);
     assert.match(source, /mediaScrollBehavior = chatScrollController\.shouldFollowOutput\(\)/);
     assert.match(source, /getHistoryPrependProfiler\(\)/);
     assert.match(source, /reportHistoryPrependBatch\(historyProfiler, \{/);
     assert.match(source, /if \(!chatScrollController\.shouldFollowOutput\(\)\) \{\s*return;/);
     assert.doesNotMatch(source, /followStreamingOutput/);
+    assert.doesNotMatch(source, /scrollViewportToBottom/);
 });

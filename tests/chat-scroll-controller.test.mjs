@@ -4,7 +4,6 @@ import test from 'node:test';
 import {
     createChatScrollController,
     isChatViewportAtBottom,
-    scrollViewportToBottom,
 } from '../src/scripts/tauri/perf/chat-scroll-controller.js';
 
 function createHarness(viewport = { scrollHeight: 1000, clientHeight: 400, scrollTop: 600 }) {
@@ -44,24 +43,6 @@ test('viewport bottom detection tolerates only a small rounding gap', () => {
     assert.equal(isChatViewportAtBottom({ scrollHeight: 1000, clientHeight: 400, scrollTop: 590 }), false);
 });
 
-test('bottom scrolling uses a WebView-safe target without reading scroll height', () => {
-    const maxScrollTop = 600;
-    let assignedScrollTop = 0;
-    const viewport = {
-        get scrollHeight() {
-            throw new Error('scrollHeight must not be read');
-        },
-        set scrollTop(value) {
-            const signedValue = value | 0;
-            assignedScrollTop = Math.min(maxScrollTop, Math.max(0, signedValue));
-        },
-    };
-
-    scrollViewportToBottom(viewport);
-
-    assert.equal(assignedScrollTop, maxScrollTop);
-});
-
 test('generation started away from bottom rejects every follow request', () => {
     const harness = createHarness({ scrollHeight: 1000, clientHeight: 400, scrollTop: 200 });
     harness.controller.beginGeneration();
@@ -85,25 +66,27 @@ test('user scroll away cancels a queued generation scroll', () => {
     assert.equal(harness.controller.requestScroll(), false);
 });
 
-test('precomputed viewport state avoids a duplicate viewport read', () => {
+test('viewport changes read the current controller state', () => {
     let viewportReads = 0;
+    const viewport = { scrollHeight: 1000, clientHeight: 400, scrollTop: 600 };
     const controller = createChatScrollController({
         readViewport: () => {
             viewportReads += 1;
-            return { scrollHeight: 1000, clientHeight: 400, scrollTop: 600 };
+            return viewport;
         },
         scrollToBottom: () => {},
         requestFrame: () => 1,
         cancelFrame: () => {},
     });
 
-    controller.onViewportChanged(false);
-    assert.equal(viewportReads, 0);
-    assert.equal(controller.shouldFollowOutput(), false);
-
     controller.onViewportChanged();
     assert.equal(viewportReads, 1);
     assert.equal(controller.shouldFollowOutput(), true);
+
+    viewport.scrollTop = 300;
+    controller.onViewportChanged();
+    assert.equal(viewportReads, 2);
+    assert.equal(controller.shouldFollowOutput(), false);
 });
 
 test('nested generation does not reset a cancelled follow session', () => {
