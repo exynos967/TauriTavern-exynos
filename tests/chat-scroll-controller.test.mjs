@@ -44,20 +44,22 @@ test('viewport bottom detection tolerates only a small rounding gap', () => {
     assert.equal(isChatViewportAtBottom({ scrollHeight: 1000, clientHeight: 400, scrollTop: 590 }), false);
 });
 
-test('bottom scrolling writes a clamped target without reading scroll height', () => {
-    let assignedScrollTop = null;
+test('bottom scrolling uses a WebView-safe target without reading scroll height', () => {
+    const maxScrollTop = 600;
+    let assignedScrollTop = 0;
     const viewport = {
         get scrollHeight() {
             throw new Error('scrollHeight must not be read');
         },
         set scrollTop(value) {
-            assignedScrollTop = value;
+            const signedValue = value | 0;
+            assignedScrollTop = Math.min(maxScrollTop, Math.max(0, signedValue));
         },
     };
 
     scrollViewportToBottom(viewport);
 
-    assert.equal(assignedScrollTop, Number.MAX_SAFE_INTEGER);
+    assert.equal(assignedScrollTop, maxScrollTop);
 });
 
 test('generation started away from bottom rejects every follow request', () => {

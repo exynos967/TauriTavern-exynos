@@ -1,12 +1,13 @@
 const DEFAULT_BOTTOM_THRESHOLD = 5;
+const MAX_WEBVIEW_SCROLL_POSITION = 2_147_483_647;
 
 export function isChatViewportAtBottom({ scrollHeight, clientHeight, scrollTop }, threshold = DEFAULT_BOTTOM_THRESHOLD) {
     return Math.abs(Number(scrollHeight) - Number(clientHeight) - Number(scrollTop)) < threshold;
 }
 
 export function scrollViewportToBottom(viewport) {
-    // A large write is clamped to the scroll range without an explicit layout-reading scrollHeight access.
-    viewport.scrollTop = Number.MAX_SAFE_INTEGER;
+    // Keep the write within signed 32-bit range for mobile WebViews while letting the viewport clamp it to the bottom.
+    viewport.scrollTop = MAX_WEBVIEW_SCROLL_POSITION;
 }
 
 export function createChatScrollController({
