@@ -24,3 +24,10 @@ export function getStreamingRenderInterval({ configuredFps, mobile, hidden }) {
 
     return configuredInterval;
 }
+
+/**
+ * Skips only exact no-op innerHTML writes. Final and fade-in renders preserve the original commit path.
+ */
+export function shouldCommitStreamingMessage({ currentHtml, nextHtml, final, fadeIn }) {
+    return Boolean(final) || Boolean(fadeIn) || currentHtml !== nextHtml;
+}

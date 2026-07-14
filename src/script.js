@@ -18,7 +18,7 @@ import { createPerformanceTrace } from './scripts/tauri/perf/performance-trace.j
 import { createChatScrollController } from './scripts/tauri/perf/chat-scroll-controller.js';
 import { getMessageRenderBatches } from './scripts/tauri/perf/message-render-batches.js';
 import { getHistoryPrependProfiler, reportHistoryPrependBatch } from './scripts/tauri/perf/history-prepend-profiler.js';
-import { getStreamingRenderInterval } from './scripts/tauri/perf/streaming-render-policy.js';
+import { getStreamingRenderInterval, shouldCommitStreamingMessage } from './scripts/tauri/perf/streaming-render-policy.js';
 import { diffStreamingPhases, isStreamingFormatProfilingEnabled, reportStreamingFormatSample } from './scripts/tauri/perf/streaming-format-profiler.js';
 import {
     isTauriChatPayloadTransportEnabled,
@@ -4508,7 +4508,12 @@ class StreamingProcessor {
                 false,
                 { perfTrace: this.perfTrace },
             ));
-            if (this.messageTextDom instanceof HTMLElement) {
+            if (this.messageTextDom instanceof HTMLElement && shouldCommitStreamingMessage({
+                currentHtml: this.messageTextDom.innerHTML,
+                nextHtml: formattedText,
+                final: isFinal,
+                fadeIn: power_user.stream_fade_in,
+            })) {
                 this.perfTrace.measure('dom-commit', () => {
                     if (power_user.stream_fade_in) {
                         applyStreamFadeIn(this.messageTextDom, formattedText);
