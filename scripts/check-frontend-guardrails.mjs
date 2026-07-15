@@ -5,9 +5,7 @@ import { init, parse } from 'es-module-lexer';
 const DEFAULT_BASELINE_PATH = 'scripts/guardrails/frontend-lines-baseline.json';
 const DEFAULT_MAX_FILE_LINES = 500;
 
-const OVER_MAX_WHITELIST = new Set([
-    'src/tauri/main/perf/perf-hud.js',
-]);
+const OVER_MAX_WHITELIST = new Set();
 
 function toPosixPath(value) {
     return String(value).replace(/\\/g, '/');

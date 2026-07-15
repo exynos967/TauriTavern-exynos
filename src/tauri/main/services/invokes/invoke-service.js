@@ -19,7 +19,6 @@ import {
  * }} deps
  */
 export function createInvokeService({ invoke, policies }) {
-    const observedTokenizerCommands = new Set(['count_openai_tokens_batch', 'count_openai_token_prefixes']);
     /** @param {Record<string, any> | null | undefined} args */
     function withTauriArgumentAliases(args) {
         if (!args || typeof args !== 'object' || Array.isArray(args)) {
@@ -201,9 +200,6 @@ export function createInvokeService({ invoke, policies }) {
     const invokeBroker = createInvokeBroker({
         transport,
         policies,
-        getObserver: command => observedTokenizerCommands.has(command)
-            ? /** @type {{ __TAURITAVERN_PERF_INVOKE_BROKER__?: (sample: object) => void }} */ (globalThis).__TAURITAVERN_PERF_INVOKE_BROKER__
-            : null,
     });
 
     /**

@@ -1,31 +1,17 @@
 const prefetches = new Map();
 
-function mark(key, suffix) {
-    if (globalThis.__TAURITAVERN_PERF_ENABLED__ === true) {
-        globalThis.performance?.mark?.(`tt:startup-prefetch:${key}:${suffix}`);
-    }
-}
-
 export function startStartupPrefetch(key, loader) {
     const existing = prefetches.get(key);
     if (existing) {
         return existing;
     }
 
-    mark(key, 'start');
     const promise = Promise.resolve()
         .then(loader)
-        .then(
-            value => {
-                mark(key, 'done');
-                return value;
-            },
-            error => {
-                mark(key, 'error');
-                prefetches.delete(key);
-                throw error;
-            },
-        );
+        .catch(error => {
+            prefetches.delete(key);
+            throw error;
+        });
 
     promise.catch(() => {});
     prefetches.set(key, promise);

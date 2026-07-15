@@ -5,7 +5,6 @@ import { executeSlashCommandsOnChatInput, executeSlashCommandsWithOptions } from
 import { SlashCommandScope } from '../../../slash-commands/SlashCommandScope.js';
 import { SlashCommandParser } from '../../../slash-commands/SlashCommandParser.js';
 import { debounceAsync, warn } from '../index.js';
-import { createPrivacySafeId, QUICK_REPLY_PERF_IDENTITY } from '../../../tauri/perf/automation-profiler.js';
 import { QuickReply } from './QuickReply.js';
 
 export class QuickReplySet {
@@ -256,15 +255,6 @@ export class QuickReplySet {
      * @param {QuickReply} qr
      */
     hookQuickReply(qr) {
-        Object.defineProperty(qr, QUICK_REPLY_PERF_IDENTITY, {
-            configurable: true,
-            enumerable: false,
-            get: () => ({
-                setKey: createPrivacySafeId(this.name),
-                sourceKey: createPrivacySafeId(`${this.name}.${qr.label}`),
-                scope: this.scope,
-            }),
-        });
         // @ts-ignore
         qr.onDebug = ()=>this.debug(qr);
         qr.onExecute = (_, options)=>this.executeWithOptions(qr, options);

@@ -2,10 +2,10 @@
 
 ## 1. 文档状态
 
-- 分析日期：2026-07-14
+- 分析日期：2026-07-15
 - TauriTavern 分支：`optimization/performance`
-- 埋点基线分支：`perf`
-- 当前运行时代码：`558f4278` 运行时优化 + Schema 11 性能监视器（默认自动采集、线程 CPU 与长任务归因；待新 APK 实测）
+- 诊断分支：`monitor`（从 `065f7ed6` 保存完整性能监视器和诊断埋点）
+- 当前运行时代码：`optimization/performance` 仅保留运行时优化和行为修复，不加载性能监视器
 - 最新实测运行时代码：`d0226330`（该实测构建仍包含随后回退的主题 unchanged-field guard）
 - 最新实测构建：TauriTavern 2.1.1 `arm64-v8a` optimization-11 Perf Release
 - 最新性能样本：`tauritavern-perf-2026-07-14T06-16-12.117Z.json`
@@ -20,7 +20,7 @@
 2. **契约验证**：已有自动化测试或新旧实现逐项等价测试，但缺少专项实机 A/B；
 3. **待验证**：只有趋势或候选解释，不能作为既定事实。
 
-`perf` 保存完整性能监视器和诊断埋点；`optimization/performance` 在其上承载运行时优化。文档提交不改变 APK 运行时代码，因此“当前分支 HEAD”和“最新实测运行时提交”需要分开理解。
+`monitor` 保存完整性能监视器和诊断埋点；`optimization/performance` 只承载运行时优化。历史样本仍可用于解释优化收益，但纯优化 APK 不再自动采集或导出性能报告。
 
 Tauri/Wry 只替换了外壳和后端。SillyTavern 前端、事件监听器、正则、Markdown、DOM 和状态管理仍运行在 WebView 中，因此“原生客户端”不等于这些工作自动变快。
 
@@ -191,28 +191,14 @@ optimization-11 的 2 次真实生成持续 120.6 s 和 148.3 s，共输出 4,92
 
 主题 unchanged-field guard 已回退：显式应用主题时恢复原有字段赋值及 CSS、DOM、action 重放。该 guard 只影响低频主题切换，没有专项实机收益证据，却可能削弱“重复应用同一主题以重新同步视觉状态”的原有语义，因此不继续保留。
 
-### 4.3 性能监视器覆盖
-
-`perf` 基线及本分支后续提交已覆盖世界书、generation、流式阶段、聊天加载、慢交互、长聊天 prepend、事件监听器、Quick Reply、Slash Command、网络、Android CPU/RSS、长任务、DOM、Tokenizer broker queue/transport/cache/dedupe。Schema 11 进一步增加：
-
-1. 应用加载性能扩展后默认自动开始采集，仍保留手动停止、重新开始、清空和导出；
-2. 每个健康样本记录当前 generation record、trace run、dry run、阶段和相对耗时；
-3. 长任务保存时间区间、generation 归属及重叠的慢 phase，便于定位半秒卡顿发生在哪个阶段；
-4. slow interaction 保留原始事件，同时按 `interactionId` 或同时间事件聚合，并关联重叠长任务；
-5. chat load 新增 `chat-state-prepare`、selection sync、chat-created 和 first-message listener 阶段；
-6. Android native sampler 每 10 次采样补一次最多 32 个线程的 CPU ticks，并在前端计算线程 CPU 百分比；
-7. 报告记录 profiler callback 累计耗时、回调次数和 snapshot 构建耗时，用于估算监视器自身成本。
-
-Schema 11 只增加诊断字段和默认启动行为，不改变生成请求、事件 await、聊天载荷、最终消息或请求体。
-
 ## 5. 后续优化计划
 
 ### P0：定位生成期间持续 CPU 与偶发超长任务
 
 1. 删除 `Generate()` 中仅用于控制台 TPS 统计的逐 chunk timestamp 数组，改为首时间、末时间和计数；
-2. Schema 11 已把健康采样、长任务、慢 phase 和 generation trace 关联，下一份报告验证 451–615 ms 长任务的具体阶段；
-3. Schema 11 已增加宿主线程 CPU ticks 和 profiler callback 开销；仍需用同一固定场景做 profiler 开启/关闭 A/B；
-4. 继续记录 regex、Markdown、sanitize、Token 事件和 DOM commit 的输入长度与成本，不跳过事件、不省略最终完整格式化；
+2. 仅在问题能够稳定复现时，切换到 `monitor` 分支采集健康样本、长任务和 generation phase；
+3. 使用同一固定场景比较纯优化分支与 `monitor` 分支，避免把诊断开销误判为业务成本；
+4. 专项诊断不得跳过事件或省略最终完整格式化；
 5. 以每千字符 CPU time、无 >200 ms 稳态长任务、最终 HTML 和请求体一致性验收。
 
 ### P1：收敛按钮、菜单与消息重绘延迟
@@ -240,7 +226,7 @@ Schema 11 只增加诊断字段和默认启动行为，不改变生成请求、�
 
 1. settings 请求记录调用方、请求体字节数、序列化、磁盘读取、修复和写入阶段；
 2. history prepend 已覆盖分页 IPC、每批 render 和滚动锚点，下一步补图片/iframe hydration；
-3. 用现有埋点覆盖 200、500 和 1,000 楼快速连续翻页。
+3. 如再次稳定复现卡顿，使用 `monitor` 分支覆盖 200、500 和 1,000 楼快速连续翻页。
 
 ## 6. 暂缓的高风险方案
 
@@ -353,9 +339,9 @@ optimization-11 样本 SHA-256：`95350A45E63FA20BD08779A1D6CE004D9F94F40E97BE04
 10. slow interaction 会为同一次物理操作保留多个 pointer/mouse/click 事件，不能把条数或时长直接相加；
 11. 最新实机样本只有进程级 CPU，不能把差值归因于某一模块；Schema 11 已增加低频线程采样，但尚未获得 Android 实机数据。
 
-## 10. 埋点缺口
+## 10. 后续验证缺口
 
-当前代码为 Schema 11，最新实机样本仍为 Schema 10。Schema 11 已补默认自动采集、generation context、长任务/phase 关联、交互聚合、聊天细分、线程 CPU 和 profiler 自身开销。剩余缺口：
+纯优化分支不再包含监视器；以下项目只在问题能够稳定复现时通过 `monitor` 分支专项验证：
 
 1. Prompt Manager dry run 的触发来源、合并次数、排队时间和实际执行次数；
 2. Rust tokenizer 内部模型加载和实际 encode CPU 的进一步拆分；线程采样只能定位线程，不能直接定位函数；
@@ -363,7 +349,7 @@ optimization-11 样本 SHA-256：`95350A45E63FA20BD08779A1D6CE004D9F94F40E97BE04
 4. DOM 节点模块归属和 detached node；
 5. settings 请求调用方、字节数和磁盘阶段；
 6. history prepend 的图片/iframe hydration；
-7. profiler 开启/关闭的 CPU、内存和输入延迟固定场景 A/B；
+7. 纯优化分支与 `monitor` 分支的 CPU、内存和输入延迟固定场景 A/B；
 8. 设备允许时的电池温度、电流和电压。
 
 ## 11. 最终结论
@@ -374,9 +360,9 @@ optimization-11 样本 SHA-256：`95350A45E63FA20BD08779A1D6CE004D9F94F40E97BE04
 - 长聊天分批渲染、集中滚动所有权和 viewport 保持已经落地并通过契约测试，但仍缺少大聊天实机压力复测；
 - 聊天切换预热已跳过无人使用的 sort/prepare/clone，optimization-11 中 listeners 平均下降 26.0%，但端到端聊天加载只下降 4.2%；
 - 流式严格相同 HTML 的 no-op DOM commit 已去重，实机跳过 33.1% DOM 写入；相近输出规模下每千字符格式化和 DOM commit 耗时分别下降 49.7% 和 54.0%；
-- 当前最严重问题依次是：生成期间持续进程 CPU 与偶发 451–615 ms 长任务、按钮/菜单事件链和 presentation delay、约一秒的聊天加载与消息重绘；
-- 流式主线程 busy ratio 已下降 55.6%，原“流式全量格式化/DOM 重复提交”不再是唯一 P0 根因；剩余 CPU 必须补线程归因和 profiler A/B 后再优化；
-- Schema 11 已默认自动开始采集，并补线程 CPU、generation context、长任务/phase、交互聚合和 profiler 开销；这些字段需由下一版 APK 实机验证；
+- 当前没有已知、可稳定复现的 P0/P1 级核心性能问题；剩余风险主要是按钮/菜单偶发 presentation delay、约一秒的聊天加载与消息重绘，以及极端输入下的固定计算成本；
+- 流式主线程 busy ratio 已下降 55.6%，原“流式全量格式化/DOM 重复提交”不再是主要根因；没有稳定复现前不继续修改核心路径；
+- 完整诊断能力已迁移到 `monitor` 分支，纯优化分支不承担采集开销；
 - 世界书 5,363 条真实生成已稳定在约 0.8–1.0 s，仍可感知但已降为次级问题；DOM/RSS 基线仍会放大布局、绘制和长期运行压力；
 - settings 和持久化是次级异步成本，不能用有状态风险的 TTL 缓存草率处理；
 - 后续优化必须以最终请求体、世界书激活、消息 HTML、变量状态、事件顺序和 viewport 等价为前提。
@@ -394,10 +380,10 @@ optimization-11 样本 SHA-256：`95350A45E63FA20BD08779A1D6CE004D9F94F40E97BE04
 | 世界书 entries prepare | 5,363 条平均 413.5 ms | 平均 200.6 ms、最大 225.8 ms | 平均下降 51.5% | 第一轮低风险分配优化完成；hash、clone 仍有剩余成本 |
 | 移动端流式预览 | chunk 到达期间频繁处理不断增长的完整输出 | 7,200 次 Token 事件对应 1,641 次格式化；543 次相同 HTML 跳过 DOM 写入 | 相近输出下每千字符格式化 -49.7%、DOM -54.0%、长任务累计 -86.7%、主线程 busy -55.6% | 主线程卡顿大幅缓解；持续进程 CPU 与偶发半秒长任务尚未解决 |
 | 聊天切换预热 | 为预取世界书执行完整 sort、prepare 和 clone，最终结果被丢弃 | 只保留 prefetch、lore 收集和 loaded 事件 | listeners 平均 -26.0%；端到端平均 -4.2% | 无用准备机制已解决，剩余瓶颈在 payload、渲染和其他监听器 |
-| 长聊天楼层渲染 | 历史楼层一次性插入，快速翻页时主线程长时间无法呈现新楼层 | 改为小批次插入并在批次间让出主线程，分页 IPC、batch render 和锚点已有埋点 | 已消除一次性大批渲染机制；性能百分比尚无实机证据 | 机制已优化，仍需 200/500/1,000 楼连续翻页复测 |
+| 长聊天楼层渲染 | 历史楼层一次性插入，快速翻页时主线程长时间无法呈现新楼层 | 改为小批次插入并在批次间让出主线程 | 已消除一次性大批渲染机制；性能百分比尚无实机证据 | 机制已优化，仍需 200/500/1,000 楼连续翻页复测 |
 | 发送、结束输出和滚动 | 多条路径可各自强制滚动，出现跳到顶部或抢占用户 viewport | 滚动所有权集中管理，发送、生成结束和 prepend 尊重 scroll lock 并保留 viewport | 两个已知跳转触发场景已处理；该项是行为正确性修复，不适合换算性能百分比 | 契约测试通过，需继续做长聊天回归 |
 | DOM 与 WebView 内存 | 少量消息时仍常驻约 2.1 万 DOM 节点，RSS 约 375–532 MiB | DOM 平均 22,384，RSS 平均约 449.8 MiB、峰值约 601.9 MiB | 没有证据表明本轮降低了基线 | 尚未解决，必须先补模块归属和循环回落数据 |
 | 设置与持久化 | settings/get、patch 和 character edit 存在秒级异步等待 | 本轮未修改有状态缓存和保存顺序 | 0 个已证实的性能问题被本轮直接消除 | 尚未优化，维持低优先级以避免 revision 和保存语义风险 |
 | 普通按钮 presentation delay | 偶发点击后数百毫秒才出现有效帧 | 扩展菜单点击链 732 ms、事件派发延迟峰值 960.2 ms、`pointerleave` 最大 304 ms | 没有可靠前后 A/B | 当前第二严重问题；需关联同帧长任务、监听器、布局和绘制 |
 
-总体上，本轮已经解决了最严重的三类结构性问题：世界书分钟级 Token 风暴、Prompt Manager 重叠 dry run，以及长聊天一次性渲染/多点滚动竞争。聊天切换无用准备和流式 no-op DOM commit 也已获得 optimization-11 实机证据。当前最严重的剩余问题是生成期间持续进程 CPU 与偶发超长任务，其次是按钮/菜单有效帧延迟和约一秒的聊天加载；世界书固定成本、DOM/RSS 基线和持久化等待已经降为后续分项。
+总体上，本轮已经解决了最严重的三类结构性问题：世界书分钟级 Token 风暴、Prompt Manager 重叠 dry run，以及长聊天一次性渲染/多点滚动竞争。聊天切换无用准备和流式 no-op DOM commit 也已获得实机证据。当前没有已知的严重核心瓶颈，剩余问题以偶发 UI 延迟、聊天加载和极端输入下的固定成本为主；没有稳定复现时暂停继续修改核心路径。

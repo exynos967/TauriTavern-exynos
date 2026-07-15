@@ -46,52 +46,6 @@ import { preinstallPanelRuntime } from './services/panel-runtime/preinstall.js';
 let bootstrapped = false;
 const HOST_ABI_VERSION = 1;
 
-function isPerfHudEnabled() {
-    try {
-        const flag = globalThis.__TAURITAVERN_PERF_ENABLED__;
-        if (typeof flag === 'boolean') {
-            return flag;
-        }
-    } catch {
-        // Ignore global access failures.
-    }
-
-    try {
-        if (globalThis.localStorage?.getItem('tt:perf') === '1') {
-            return true;
-        }
-    } catch {
-        // Ignore storage access failures.
-    }
-
-    try {
-        const search = String(globalThis.location?.search || '');
-        if (!search) {
-            return false;
-        }
-        const params = new URLSearchParams(search);
-        return params.get('ttPerf') === '1' || params.get('tt_perf') === '1';
-    } catch {
-        return false;
-    }
-}
-
-function safePerfMark(name, detail) {
-    try {
-        globalThis.performance?.mark?.(name, detail ? { detail } : undefined);
-    } catch {
-        // Ignore unsupported mark calls.
-    }
-}
-
-function safePerfMeasure(name, startMark, endMark) {
-    try {
-        globalThis.performance?.measure?.(name, startMark, endMark);
-    } catch {
-        // Ignore unsupported measure calls.
-    }
-}
-
 function isMobileUserAgent() {
     // NOTE: Intentionally self-contained UA check.
     // This runs in the Tauri bootstrap composition root; importing a shared helper here risks
@@ -258,11 +212,6 @@ export function bootstrapTauriMain() {
     }
     bootstrapped = true;
 
-    const perfEnabled = isPerfHudEnabled();
-    let perfReadyPromise = null;
-    if (perfEnabled) {
-        safePerfMark('tt:tauri:bootstrap:start');
-    }
     const isMobile = isMobileUserAgent(); if (isMobile) installTauriMobileCompat();
 
     installFrontendLogCapture();
@@ -275,15 +224,6 @@ export function bootstrapTauriMain() {
     installHostAbi(context); installLayoutApi(context); installChatApi(context); installCharacterCardsApi(context); installAgentApi(context); installLlmConnectionsApi(context); installSkillApi(context); installDevApi(context); installExtensionStoreApi(context); installWorldInfoApi();
     installMainApiOptionParking();
     installWorldInfoGlobalSelectorSelect2Enforcer();
-    if (perfEnabled) {
-        perfReadyPromise = import('./perf/perf-hud.js')
-            .then(({ installPerfHud }) => installPerfHud({ context }))
-            .catch((error) => {
-                console.warn('TauriTavern: Failed to load perf HUD:', error);
-                return null;
-            });
-        window.__TAURITAVERN_PERF_READY__ = perfReadyPromise;
-    }
     const router = createRouteRegistry();
     registerRoutes(router, context, { jsonResponse, textResponse });
 
@@ -371,14 +311,7 @@ export function bootstrapTauriMain() {
         runtimeCompat,
     });
     if (isMobile) installMobileWindowOpenCompat(); preinstallPanelRuntime();
-    const readyPromise = initializeTauriIntegration(
-        context,
-        interceptors,
-        downloadBridge,
-        perfEnabled,
-        perfReadyPromise,
-        safePerfMark,
-    );
+    const readyPromise = initializeTauriIntegration(context, interceptors, downloadBridge);
     void readyPromise.catch((error) => {
         console.error('Failed to initialize Tauri integration:', error);
     });
@@ -408,12 +341,4 @@ export function bootstrapTauriMain() {
     runAfterTauriReady(() => import('./services/panel-runtime/install.js')
         .then(({ installPanelRuntime }) => installPanelRuntime()));
 
-    if (perfEnabled) {
-        readyPromise
-            .then(() => {
-                safePerfMark('tt:tauri:ready');
-                safePerfMeasure('tt:tauri:ready', 'tt:tauri:bootstrap:start', 'tt:tauri:ready');
-            })
-            .catch(() => {});
-    }
 }

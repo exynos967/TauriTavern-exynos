@@ -15,10 +15,10 @@ test('chat changes preload world info without preparing discarded entries', asyn
     assert.match(chatChangedHandler, /await preloadWorldInfoEntries\(\);/);
     assert.doesNotMatch(chatChangedHandler, /getSortedEntries\(/);
 
-    assert.match(preloadFunction, /await collectWorldInfoEntries\(perfTrace\);/);
+    assert.match(preloadFunction, /await collectWorldInfoEntries\(\);/);
     assert.doesNotMatch(preloadFunction, /prepareWorldInfoEntries|structuredClone|entries-sort/);
 
-    assert.match(sortedFunction, /await collectWorldInfoEntries\(perfTrace\)/);
+    assert.match(sortedFunction, /await collectWorldInfoEntries\(\)/);
     assert.match(sortedFunction, /prepareWorldInfoEntries/);
     assert.match(sortedFunction, /structuredClone\(entries\)/);
 });

@@ -14,12 +14,9 @@ import { SILLYTAVERN_COMPAT_VERSION } from './compat-version.js';
 import { replaceMesTextHtmlWithRuntimePolicy } from './scripts/tauri/message/mes-text-write.js';
 import { getCodeHighlightCoordinator } from './scripts/tauri/perf/code-highlight-coordinator.js';
 import { isInlineDrawerContentOpen, setInlineDrawerContentOpen } from './scripts/tauri/perf/inline-drawer-motion.js';
-import { createPerformanceTrace } from './scripts/tauri/perf/performance-trace.js';
 import { createChatScrollController, createChatScrollIntentTracker } from './scripts/tauri/perf/chat-scroll-controller.js';
 import { getMessageRenderBatches } from './scripts/tauri/perf/message-render-batches.js';
-import { getHistoryPrependProfiler, reportHistoryPrependBatch } from './scripts/tauri/perf/history-prepend-profiler.js';
 import { getStreamingRenderInterval, shouldCommitStreamingMessage } from './scripts/tauri/perf/streaming-render-policy.js';
-import { diffStreamingPhases, isStreamingFormatProfilingEnabled, reportStreamingFormatSample } from './scripts/tauri/perf/streaming-format-profiler.js';
 import {
     isTauriChatPayloadTransportEnabled,
     loadCharacterChatPayload,
@@ -961,20 +958,15 @@ async function fetchBootstrapSnapshot() {
 //MARK: firstLoadInit
 async function firstLoadInit() {
     const startupStatus = createStartupStatusOverlay();
-    const perfEnabled = globalThis.__TAURITAVERN_PERF_ENABLED__ === true;
-    const perfMark = (name) => perfEnabled && globalThis.performance?.mark?.(name);
 
     const setStage = (stage, message) => {
         globalThis.__TAURITAVERN_STARTUP_STAGE__ = stage;
         startupStatus.setText(message);
-        perfMark(`tt:startup:${stage}`);
     };
 
     const nextPaint = () => new Promise((resolve) => requestAnimationFrame(resolve));
 
     const hostReadyPromise = waitForTauriMainReady({ failFast: true });
-
-    perfMark('tt:startup:start');
 
     try {
         setStage('shell', '启动中：渲染界面…（扩展稍后加载）');
@@ -1109,7 +1101,6 @@ async function firstLoadInit() {
         await eventSource.emit(event_types.APP_READY);
 
         startupStatus.remove();
-        perfMark('tt:startup:ready');
 
         void (async () => {
             await nextPaint();
@@ -1845,67 +1836,32 @@ export async function replaceCurrentChat() {
 /** @type {{ state: any, promise: Promise<void> } | null} */
 let windowedShowMoreMessagesPending = null;
 
-async function prependWindowedMessageElements(messages, showMoreButton, prevHeight, keepAnchor, perfTrace) {
+async function prependWindowedMessageElements(messages, showMoreButton, prevHeight, keepAnchor) {
     const renderBatches = getMessageRenderBatches(messages.length);
     let insertionAnchor = showMoreButton[0] ?? null;
-    const historyProfiler = getHistoryPrependProfiler();
 
     for (const [batchIndex, batch] of renderBatches.entries()) {
-        const batchStartedAt = historyProfiler ? performance.now() : 0;
-        const heightBefore = historyProfiler ? Number(chatElement.prop('scrollHeight')) || 0 : 0;
-        let renderDurationMs = 0;
-        let domCommitDurationMs = 0;
-        let anchorDurationMs = 0;
         const fragment = document.createDocumentFragment();
         let lastElement = null;
-        perfTrace.measure('messages-render', () => {
-            const startedAt = historyProfiler ? performance.now() : 0;
-            for (let id = batch.start; id < batch.end; id += 1) {
-                const messageElement = updateMessageElement(chat[id], { messageId: id });
-                lastElement = messageElement[0];
-                fragment.appendChild(lastElement);
-            }
-            renderDurationMs = historyProfiler ? performance.now() - startedAt : 0;
-        });
+        for (let id = batch.start; id < batch.end; id += 1) {
+            const messageElement = updateMessageElement(chat[id], { messageId: id });
+            lastElement = messageElement[0];
+            fragment.appendChild(lastElement);
+        }
 
-        perfTrace.measure('dom-commit', () => {
-            const startedAt = historyProfiler ? performance.now() : 0;
-            if (insertionAnchor) {
-                insertionAnchor.after(fragment);
-            } else {
-                chatElement[0].prepend(fragment);
-            }
-            domCommitDurationMs = historyProfiler ? performance.now() - startedAt : 0;
-        });
+        if (insertionAnchor) {
+            insertionAnchor.after(fragment);
+        } else {
+            chatElement[0].prepend(fragment);
+        }
         insertionAnchor = lastElement;
 
         if (keepAnchor) {
-            const startedAt = historyProfiler ? performance.now() : 0;
             const newHeight = chatElement.prop('scrollHeight');
             chatElement.scrollTop(newHeight - prevHeight);
-            anchorDurationMs = historyProfiler ? performance.now() - startedAt : 0;
         }
 
         const yieldedFrame = batchIndex < renderBatches.length - 1;
-        if (historyProfiler) {
-            const heightAfter = Number(chatElement.prop('scrollHeight')) || heightBefore;
-            reportHistoryPrependBatch(historyProfiler, {
-                traceRunId: perfTrace.runId,
-                batchIndex,
-                batchCount: renderBatches.length,
-                startIndex: batch.start,
-                endIndex: batch.end,
-                messageCount: batch.end - batch.start,
-                keepAnchor: Boolean(keepAnchor),
-                yieldedFrame,
-                renderDurationMs,
-                domCommitDurationMs,
-                anchorDurationMs,
-                totalDurationMs: performance.now() - batchStartedAt,
-                heightDelta: heightAfter - heightBefore,
-            });
-        }
-
         if (yieldedFrame) {
             await new Promise(resolve => requestAnimationFrame(resolve));
         }
@@ -1928,13 +1884,8 @@ export async function showMoreMessages(messagesToLoad = null) {
         const prevHeight = chatElement.prop('scrollHeight');
         const showMoreButton = $('#show_more_messages');
         const isButtonInView = showMoreButton[0] && isElementInViewport(showMoreButton[0]);
-        const perfTrace = createPerformanceTrace('tt:history-prepend', {
-            transport: 'tauri',
-            requestedMessages: count,
-        });
-
         const run = (async () => {
-            const result = await perfTrace.measureAsync('payload-read', () => windowState.kind === 'group'
+            const result = await (windowState.kind === 'group'
                 ? loadGroupChatPayloadBefore({
                     id: windowState.id,
                     cursor: windowState.cursor,
@@ -1949,7 +1900,6 @@ export async function showMoreMessages(messagesToLoad = null) {
                 }));
 
             if (getWindowedChatState() !== windowState) {
-                perfTrace.finish({ success: false, reason: 'stale' });
                 return;
             }
 
@@ -1962,19 +1912,16 @@ export async function showMoreMessages(messagesToLoad = null) {
                     hasMoreBefore: false,
                 });
                 await eventSource.emit(event_types.MORE_MESSAGES_LOADED);
-                perfTrace.finish({ success: true, messages: 0 });
                 return;
             }
 
-            perfTrace.measure('payload-apply', () => {
-                messages.forEach(ensureMessageMediaIsArray);
-                chat.splice(0, 0, ...messages);
-            });
+            messages.forEach(ensureMessageMediaIsArray);
+            chat.splice(0, 0, ...messages);
             if (this_edit_mes_id >= 0) {
                 this_edit_mes_id = Number(this_edit_mes_id) + messages.length;
             }
             updateViewMessageIds(messages.length);
-            await prependWindowedMessageElements(messages, showMoreButton, prevHeight, isButtonInView, perfTrace);
+            await prependWindowedMessageElements(messages, showMoreButton, prevHeight, isButtonInView);
             updateViewMessageIds(0);
             refreshSwipeButtons();
 
@@ -1992,12 +1939,8 @@ export async function showMoreMessages(messagesToLoad = null) {
 
             applyStylePins();
             applyCharacterTagsToMessageDivs();
-            await perfTrace.measureAsync('loaded-listeners', () => eventSource.emit(event_types.MORE_MESSAGES_LOADED));
-            perfTrace.finish({ success: true, messages: messages.length });
-        })().catch(error => {
-            perfTrace.finish({ success: false, error: String(error?.message ?? error) });
-            throw error;
-        });
+            await eventSource.emit(event_types.MORE_MESSAGES_LOADED);
+        })();
 
         windowedShowMoreMessagesPending = { state: windowState, promise: run };
 
@@ -2089,10 +2032,6 @@ export async function printMessages() {
  * @param {Boolean} [options.fade=true] When false, the swipe chevrons will not fade in.
  */
 export async function redisplayChat({ targetChat = chat, startIndex = 0, fade = true } = {}) {
-    const perfTrace = createPerformanceTrace('tt:messages-redisplay', {
-        messages: Math.max(0, targetChat.length - startIndex),
-        startIndex,
-    });
     const messageElements = chatElement.find('.mes');
     messageElements.removeClass('last_mes');
 
@@ -2110,16 +2049,14 @@ export async function redisplayChat({ targetChat = chat, startIndex = 0, fade = 
             const batchEnd = Math.min(batchStart + batchSize, targetChat.length);
             const fragment = document.createDocumentFragment();
 
-            perfTrace.measure('messages-render', () => {
-                for (let id = batchStart; id < batchEnd; id += 1) {
-                    const messageElement = updateMessageElement(targetChat[id], { messageId: id });
-                    const element = messageElement[0];
-                    fragment.appendChild(element);
-                    lastMessageElement = element;
-                }
-            });
+            for (let id = batchStart; id < batchEnd; id += 1) {
+                const messageElement = updateMessageElement(targetChat[id], { messageId: id });
+                const element = messageElement[0];
+                fragment.appendChild(element);
+                lastMessageElement = element;
+            }
 
-            perfTrace.measure('dom-commit', () => appendTarget.appendChild(fragment));
+            appendTarget.appendChild(fragment);
 
             if (batchEnd < targetChat.length) {
                 await new Promise((resolve) => requestAnimationFrame(resolve));
@@ -2133,7 +2070,6 @@ export async function redisplayChat({ targetChat = chat, startIndex = 0, fade = 
     refreshSwipeButtons(false, fade);
     applyStylePins();
     updateEditArrowClasses();
-    perfTrace.finish({ success: true });
 
     console.info(`Rendered ${targetChat.length - startIndex} messages in ${((performance.now() - t1) / 1000).toFixed(3)} seconds.`);
 }
@@ -2524,22 +2460,19 @@ export function messageFormatting(mes, ch_name, isSystem, isUser, messageId, san
         mes = mes.slice(replacedPromptBias.length);
     }
 
-    const perfTrace = formattingOptions?.perfTrace;
     if (!isSystem && !formattingOptions?.skipRegex) {
         const { placement: regexPlacement, depth } = getMessageFormattingRegexContext(isUser, messageId, isReasoning);
 
         // Always override the character name
-        const applyRegex = () => getRegexedString(mes, regexPlacement, {
+        mes = getRegexedString(mes, regexPlacement, {
             characterOverride: ch_name,
             isMarkdown: true,
             depth: depth,
         });
-        mes = perfTrace ? perfTrace.measure('format-regex', applyRegex) : applyRegex();
     }
 
     if (power_user.auto_fix_generated_markdown) {
-        const fixGeneratedMarkdown = () => fixMarkdown(mes, true);
-        mes = perfTrace ? perfTrace.measure('format-markdown-fix', fixGeneratedMarkdown) : fixGeneratedMarkdown();
+        mes = fixMarkdown(mes, true);
     }
 
     if (!isSystem && power_user.encode_tags) {
@@ -2559,7 +2492,6 @@ export function messageFormatting(mes, ch_name, isSystem, isUser, messageId, san
         }
     });
 
-    const markdownStartedAt = perfTrace?.start();
     if (!isSystem) {
         // Save double quotes in tags as a special character to prevent them from being encoded
         if (!power_user.encode_tags) {
@@ -2616,10 +2548,6 @@ export function messageFormatting(mes, ch_name, isSystem, isUser, messageId, san
             return match.replace(/&amp;/g, '&');
         });
     }
-    if (perfTrace) {
-        perfTrace.end('format-markdown', markdownStartedAt);
-    }
-
     if (!power_user.allow_name2_display && ch_name && !isUser && !isSystem) {
         mes = mes.replace(new RegExp(`(^|\n)${escapeRegex(ch_name)}:`, 'g'), '$1');
     }
@@ -2633,12 +2561,9 @@ export function messageFormatting(mes, ch_name, isSystem, isUser, messageId, san
         ADD_TAGS: ['custom-style'],
         ...sanitizerOverrides,
     };
-    const sanitize = () => {
-        let sanitized = encodeStyleTags(mes);
-        sanitized = DOMPurify.sanitize(sanitized, config);
-        return decodeStyleTags(sanitized, { prefix: '.mes_text ' });
-    };
-    mes = perfTrace ? perfTrace.measure('format-sanitize', sanitize) : sanitize();
+    mes = encodeStyleTags(mes);
+    mes = DOMPurify.sanitize(mes, config);
+    mes = decodeStyleTags(mes, { prefix: '.mes_text ' });
 
     return mes;
 }
@@ -4310,9 +4235,8 @@ class StreamingProcessor {
      * @param {Date} timeStarted Date when generation was started
      * @param {string} continueMessage Previous message if the type is 'continue'
      * @param {PromptReasoning} promptReasoning Prompt reasoning instance
-     * @param {string|null} perfParentRunId Parent generation trace ID for diagnostics only
      */
-    constructor(type, forceName2, timeStarted, continueMessage, promptReasoning, perfParentRunId = null) {
+    constructor(type, forceName2, timeStarted, continueMessage, promptReasoning) {
         this.result = '';
         this.messageId = -1;
         /** @type {HTMLElement} */
@@ -4351,21 +4275,6 @@ class StreamingProcessor {
         this.reasoningSignature = null;
         /** @type {any?} */
         this.native = null;
-        this.perfTrace = createPerformanceTrace('tt:stream', { type, parentRunId: perfParentRunId });
-        this.perfTraceFinished = false;
-    }
-
-    finishPerfTrace(reason, success = true) {
-        if (this.perfTraceFinished) {
-            return;
-        }
-
-        this.perfTraceFinished = true;
-        this.perfTrace.finish({
-            reason,
-            success,
-            outputChars: this.result.length,
-        });
     }
 
     /**
@@ -4424,12 +4333,8 @@ class StreamingProcessor {
     }
 
     async onProgressStreaming(messageId, text, isFinal) {
-        const profileStreamFormat = isStreamingFormatProfilingEnabled();
-        const formatStartedAt = profileStreamFormat ? performance.now() : 0;
-        const phasesBefore = profileStreamFormat ? this.perfTrace.snapshotPhases() : null;
         const isImpersonate = this.type == 'impersonate';
         const isContinue = this.type == 'continue';
-        const cleanupStartedAt = this.perfTrace.start();
 
         if (!isImpersonate && !isContinue && Array.isArray(this.swipes) && this.swipes.length > 0) {
             for (let i = 0; i < this.swipes.length; i++) {
@@ -4450,7 +4355,6 @@ class StreamingProcessor {
             displayIncompleteSentences: !isFinal,
             stoppingStrings: this.stoppingStrings,
         });
-        this.perfTrace.end('cleanup', cleanupStartedAt);
 
         const charsToBalance = ['*', '"', '```', '~~~'];
         for (const char of charsToBalance) {
@@ -4478,7 +4382,7 @@ class StreamingProcessor {
             chat[messageId].extra.time_to_first_token = this.timeToFirstToken;
 
             // Update reasoning
-            await this.perfTrace.measureAsync('reasoning-update', () => this.reasoningHandler.process(messageId, mesChanged, this.promptReasoning));
+            await this.reasoningHandler.process(messageId, mesChanged, this.promptReasoning);
             processedText = chat[messageId].mes;
 
             // Token count update.
@@ -4501,7 +4405,7 @@ class StreamingProcessor {
                 };
             }
 
-            const formattedText = this.perfTrace.measure('format-total', () => messageFormatting(
+            const formattedText = messageFormatting(
                 processedText,
                 chat[messageId].name,
                 chat[messageId].is_system,
@@ -4509,33 +4413,18 @@ class StreamingProcessor {
                 messageId,
                 {},
                 false,
-                { perfTrace: this.perfTrace },
-            ));
+            );
             if (this.messageTextDom instanceof HTMLElement && shouldCommitStreamingMessage({
                 currentHtml: this.messageTextDom.innerHTML,
                 nextHtml: formattedText,
                 final: isFinal,
                 fadeIn: power_user.stream_fade_in,
             })) {
-                this.perfTrace.measure('dom-commit', () => {
-                    if (power_user.stream_fade_in) {
-                        applyStreamFadeIn(this.messageTextDom, formattedText);
-                    } else {
-                        this.messageTextDom.innerHTML = formattedText;
-                    }
-                });
-            }
-
-            if (profileStreamFormat) {
-                reportStreamingFormatSample({
-                    streamRunId: this.perfTrace.runId,
-                    inputChars: String(text ?? '').length,
-                    processedChars: processedText.length,
-                    formattedChars: formattedText.length,
-                    final: Boolean(isFinal),
-                    durationMs: performance.now() - formatStartedAt,
-                    phases: diffStreamingPhases(phasesBefore, this.perfTrace.snapshotPhases()),
-                });
+                if (power_user.stream_fade_in) {
+                    applyStreamFadeIn(this.messageTextDom, formattedText);
+                } else {
+                    this.messageTextDom.innerHTML = formattedText;
+                }
             }
 
             const timePassed = formatGenerationTimer(this.timeStarted, currentTime, currentTokenCount, this.reasoningHandler.getDuration(), this.timeToFirstToken);
@@ -4548,7 +4437,7 @@ class StreamingProcessor {
         }
 
         if (chatScrollController.shouldFollowOutput()) {
-            this.perfTrace.measure('scroll-schedule', () => scrollChatToBottom({ waitForFrame: true }));
+            scrollChatToBottom({ waitForFrame: true });
         }
     }
 
@@ -4617,14 +4506,10 @@ class StreamingProcessor {
         }
 
         updateSwipeCounter(messageId, { message, messageElement });
-        if (!unlockUI) {
-            this.finishPerfTrace('tool-call');
-        }
     }
 
     async onFinishStreaming(messageId, text) {
         await this.finalizeIntermediaryMessage(messageId, text, { unlockUI: true });
-        this.finishPerfTrace('completed');
 
         const isAborted = this.abortController.signal.aborted;
         if (!isAborted && power_user.auto_swipe && generatedTextFiltered(text)) {
@@ -4646,7 +4531,6 @@ class StreamingProcessor {
             eventSource.emit(event_types.MESSAGE_RECEIVED, this.messageId, this.type);
             eventSource.emit(event_types.CHARACTER_MESSAGE_RENDERED, this.messageId, this.type);
         }
-        this.finishPerfTrace('error', false);
     }
 
     setFirstSwipe(messageId) {
@@ -4666,7 +4550,6 @@ class StreamingProcessor {
     onStopStreaming() {
         this.abortController.abort();
         this.isFinished = true;
-        this.finishPerfTrace('stopped', false);
     }
 
     /**
@@ -4716,7 +4599,7 @@ class StreamingProcessor {
                 this.images = state?.images ?? [];
                 this.reasoningSignature = state?.signature ?? null;
                 this.native = state?.native ?? null;
-                await this.perfTrace.measureAsync('token-event-listeners', () => eventSource.emit(event_types.STREAM_TOKEN_RECEIVED, text));
+                await eventSource.emit(event_types.STREAM_TOKEN_RECEIVED, text);
                 await sw.tick(async () => await this.onProgressStreaming(this.messageId, this.continueMessage + text));
             }
             const seconds = (timestamps[timestamps.length - 1] - timestamps[0]) / 1000;
@@ -5172,23 +5055,14 @@ function cleanupGenerationAfterUnhandledError(type, dryRun) {
 
 async function GenerateInternal(type, options = {}, dryRun = false) {
     chatScrollController.beginGeneration();
-    const perfTrace = createPerformanceTrace('tt:generation', {
-        type,
-        dryRun: Boolean(dryRun),
-    });
     try {
-        const result = await GenerateInternalCore(type, options, dryRun, perfTrace);
-        perfTrace.finish({ success: true });
-        return result;
-    } catch (error) {
-        perfTrace.finish({ success: false });
-        throw error;
+        return await GenerateInternalCore(type, options, dryRun);
     } finally {
         chatScrollController.endGeneration();
     }
 }
 
-async function GenerateInternalCore(type, { automatic_trigger, force_name2, quiet_prompt, quietToLoud, skipWIAN, force_chid, signal, quietImage, quietName, jsonSchema = null, depth = 0, agentMode = false, agentProfileId = null, agentContextPolicy = null, agentSystemPrompt = null } = {}, dryRun = false, perfTrace = null) {
+async function GenerateInternalCore(type, { automatic_trigger, force_name2, quiet_prompt, quietToLoud, skipWIAN, force_chid, signal, quietImage, quietName, jsonSchema = null, depth = 0, agentMode = false, agentProfileId = null, agentContextPolicy = null, agentSystemPrompt = null } = {}, dryRun = false) {
     console.log('Generate entered');
     setGenerationProgress(0);
     generation_started = new Date();
@@ -5196,10 +5070,10 @@ async function GenerateInternalCore(type, { automatic_trigger, force_name2, quie
     const resolvedAgentSystemPrompt = agentMode ? normalizeAgentSystemPrompt(agentSystemPrompt) : null;
 
     // Prevent generation from shallow characters
-    await perfTrace.measureAsync('character-load', () => unshallowCharacter(this_chid));
+    await unshallowCharacter(this_chid);
 
     // Occurs every time, even if the generation is aborted due to slash commands execution
-    await perfTrace.measureAsync('generation-start-listeners', () => eventSource.emit(event_types.GENERATION_STARTED, type, { automatic_trigger, force_name2, quiet_prompt, quietToLoud, skipWIAN, force_chid, signal, quietImage }, dryRun));
+    await eventSource.emit(event_types.GENERATION_STARTED, type, { automatic_trigger, force_name2, quiet_prompt, quietToLoud, skipWIAN, force_chid, signal, quietImage }, dryRun);
 
     // Don't recreate abort controller if signal is passed
     if (!(abortController && signal)) {
@@ -5211,7 +5085,7 @@ async function GenerateInternalCore(type, { automatic_trigger, force_name2, quie
     const isImpersonate = type == 'impersonate';
 
     if (!(dryRun || depth || type == 'regenerate' || type == 'swipe' || type == 'quiet')) {
-        const interruptedByCommand = await perfTrace.measureAsync('slash-commands', () => processCommands(String($('#send_textarea').val())));
+        const interruptedByCommand = await processCommands(String($('#send_textarea').val()));
 
         if (interruptedByCommand) {
             //$("#send_textarea").val('')[0].dispatchEvent(new Event('input', { bubbles:true }));
@@ -5221,7 +5095,7 @@ async function GenerateInternalCore(type, { automatic_trigger, force_name2, quie
     }
 
     // Occurs only if the generation is not aborted due to slash commands execution
-    await perfTrace.measureAsync('after-commands-listeners', () => eventSource.emit(event_types.GENERATION_AFTER_COMMANDS, type, { automatic_trigger, force_name2, quiet_prompt, quietToLoud, skipWIAN, force_chid, signal, quietImage }, dryRun));
+    await eventSource.emit(event_types.GENERATION_AFTER_COMMANDS, type, { automatic_trigger, force_name2, quiet_prompt, quietToLoud, skipWIAN, force_chid, signal, quietImage }, dryRun);
 
     if (main_api == 'kobold' && kai_settings.streaming_kobold && !kai_flags.can_use_streaming) {
         toastr.error(t`Streaming is enabled, but the version of Kobold used does not support token streaming.`, undefined, { timeOut: 10000, preventDuplicates: true });
@@ -5236,7 +5110,7 @@ async function GenerateInternalCore(type, { automatic_trigger, force_name2, quie
 
     if (!dryRun) {
         // Ping server to make sure it is still alive
-        const pingResult = await perfTrace.measureAsync('server-ping', () => pingServer());
+        const pingResult = await pingServer();
 
         if (!pingResult) {
             unblockGeneration(type);
@@ -5279,9 +5153,6 @@ async function GenerateInternalCore(type, { automatic_trigger, force_name2, quie
             return Promise.resolve();
         }
     }
-
-    const promptAssemblyStartedAt = perfTrace.start();
-    let promptSubphaseStartedAt = perfTrace.start();
 
     //#########QUIET PROMPT STUFF##############
     //this function just gives special care to novel quiet instruction prompts
@@ -5458,13 +5329,11 @@ async function GenerateInternalCore(type, { automatic_trigger, force_name2, quie
         coreChat.pop();
     }
 
-    perfTrace.end('context-preparation', promptSubphaseStartedAt);
-    promptSubphaseStartedAt = perfTrace.start();
-    const coreChatRegexedMessages = await perfTrace.measureAsync('history-regex', () => getRegexedStringBatchAsync(coreChat.map((/** @type {ChatMessage} */ chatItem, index) => ({
+    const coreChatRegexedMessages = await getRegexedStringBatchAsync(coreChat.map((/** @type {ChatMessage} */ chatItem, index) => ({
         rawString: chatItem.mes,
         placement: chatItem.is_user ? regex_placement.USER_INPUT : regex_placement.AI_OUTPUT,
         params: { isPrompt: true, depth: (coreChat.length - index - (isContinue ? 2 : 1)) },
-    }))));
+    })));
 
     coreChat = await Promise.all(coreChat.map(async (/** @type {ChatMessage} */ chatItem, index) => {
         let regexedMessage = coreChatRegexedMessages[index];
@@ -5493,11 +5362,11 @@ async function GenerateInternalCore(type, { automatic_trigger, force_name2, quie
     }));
 
     const promptReasoning = new PromptReasoning();
-    const regexedReasoning = await perfTrace.measureAsync('reasoning-regex', () => getRegexedStringBatchAsync(coreChat.map((chatItem, index) => ({
+    const regexedReasoning = await getRegexedStringBatchAsync(coreChat.map((chatItem, index) => ({
         rawString: String(chatItem.extra?.reasoning ?? ''),
         placement: regex_placement.REASONING,
         params: { isPrompt: true, depth: coreChat.length - index - (isContinue ? 2 : 1) },
-    }))));
+    })));
 
     for (let i = coreChat.length - 1; i >= 0; i--) {
         const isPrefix = isContinue && i === coreChat.length - 1;
@@ -5521,12 +5390,9 @@ async function GenerateInternalCore(type, { automatic_trigger, force_name2, quie
         }
     }
 
-    perfTrace.end('history-preparation', promptSubphaseStartedAt);
-    promptSubphaseStartedAt = perfTrace.start();
-
     if (!dryRun) {
         console.debug('Running extension interceptors');
-        const aborted = await perfTrace.measureAsync('extension-interceptors', () => runGenerationInterceptors(coreChat, this_max_context, type));
+        const aborted = await runGenerationInterceptors(coreChat, this_max_context, type);
 
         if (aborted) {
             console.debug('Generation aborted by extension interceptors');
@@ -5599,9 +5465,7 @@ async function GenerateInternalCore(type, { automatic_trigger, force_name2, quie
         creatorNotes: creatorNotes,
         trigger: GENERATION_TYPE_TRIGGERS.includes(type) ? type : 'normal',
     };
-    perfTrace.end('pre-world-preparation', promptSubphaseStartedAt);
-    const { worldInfoString, worldInfoBefore, worldInfoAfter, worldInfoExamples, worldInfoDepth, outletEntries, worldInfoActivation } = await perfTrace.measureAsync('world-info', () => getWorldInfoPrompt(chatForWI, this_max_context, dryRun, globalScanData, perfTrace.runId));
-    promptSubphaseStartedAt = perfTrace.start();
+    const { worldInfoString, worldInfoBefore, worldInfoAfter, worldInfoExamples, worldInfoDepth, outletEntries, worldInfoActivation } = await getWorldInfoPrompt(chatForWI, this_max_context, dryRun, globalScanData);
     setExtensionPrompt(inject_ids.QUIET_PROMPT, '', extension_prompt_types.IN_PROMPT, 0, true);
     const includeActivatedWorldInfo = !agentMode || resolvedAgentContextPolicy.includeActivatedWorldInfo;
     const promptWorldInfoBefore = includeActivatedWorldInfo ? worldInfoBefore : '';
@@ -6316,9 +6180,7 @@ async function GenerateInternalCore(type, { automatic_trigger, force_name2, quie
         }
     }
 
-    await perfTrace.measureAsync('after-data-listeners', () => eventSource.emit(event_types.GENERATE_AFTER_DATA, generate_data, dryRun));
-    perfTrace.end('prompt-finalization', promptSubphaseStartedAt);
-    perfTrace.end('prompt-assembly', promptAssemblyStartedAt);
+    await eventSource.emit(event_types.GENERATE_AFTER_DATA, generate_data, dryRun);
 
     if (dryRun) {
         return Promise.resolve();
@@ -6392,13 +6254,13 @@ async function GenerateInternalCore(type, { automatic_trigger, force_name2, quie
 
         if (isStreamingEnabled() && type !== 'quiet') {
             continue_mag = promptReasoning.removePrefix(continue_mag);
-            streamingProcessor = new StreamingProcessor(type, force_name2, generation_started, continue_mag, promptReasoning, perfTrace.runId);
+            streamingProcessor = new StreamingProcessor(type, force_name2, generation_started, continue_mag, promptReasoning);
             if (isContinue) {
                 // Save reply does add cycle text to the prompt, so it's not needed here
                 streamingProcessor.firstMessageText = '';
             }
 
-            streamingProcessor.generator = await perfTrace.measureAsync('request-dispatch', () => sendStreamingRequest(type, generate_data, { jsonSchema }));
+            streamingProcessor.generator = await sendStreamingRequest(type, generate_data, { jsonSchema });
 
             hideSwipeButtons();
             let getMessage = await streamingProcessor.generate();
@@ -6456,7 +6318,7 @@ async function GenerateInternalCore(type, { automatic_trigger, force_name2, quie
                 });
             }
         } else {
-            return await perfTrace.measureAsync('request-response', () => sendGenerationRequest(type, generate_data, { jsonSchema }));
+            return await sendGenerationRequest(type, generate_data, { jsonSchema });
         }
     }
 
@@ -8971,33 +8833,29 @@ export async function getChat({ allowNewChat = false } = {}) {
     const startedSelectedGroup = selected_group;
     const startedCharacter = startedChid !== undefined ? characters[startedChid] : null;
     const startedChatFile = startedCharacter?.chat;
-    const perfTrace = createPerformanceTrace('tt:chat-load', {
-        allowNewChat: Boolean(allowNewChat),
-        transport: isTauriChatPayloadTransportEnabled() ? 'tauri' : 'http',
-    });
 
     try {
-        await perfTrace.measureAsync('character-load', () => unshallowCharacter(startedChid));
+        await unshallowCharacter(startedChid);
         const usePayloadTransport = isTauriChatPayloadTransportEnabled();
         let data;
         let windowedCursor = null;
         let windowedHasMoreBefore = false;
 
         if (usePayloadTransport) {
-            const window = await perfTrace.measureAsync('payload-read', () => loadCharacterChatPayloadTail({
+            const window = await loadCharacterChatPayloadTail({
                 characterName: startedCharacter?.name,
                 avatarUrl: startedCharacter?.avatar,
                 fileName: startedChatFile,
                 maxLines: DEFAULT_CHAT_WINDOW_LINES,
                 allowNotFound: allowNewChat,
-            }));
+            });
 
             data = window.payload;
             windowedCursor = window.cursor ?? null;
             windowedHasMoreBefore = Boolean(window.hasMoreBefore);
         } else {
             clearWindowedChatState();
-            const response = await perfTrace.measureAsync('payload-read', () => fetch('/api/chats/get', {
+            const response = await fetch('/api/chats/get', {
                 method: 'POST',
                 headers: getRequestHeaders(),
                 cache: 'no-cache',
@@ -9007,13 +8865,13 @@ export async function getChat({ allowNewChat = false } = {}) {
                     avatar_url: startedCharacter?.avatar,
                     allow_not_found: allowNewChat,
                 }),
-            }));
+            });
 
             if (!response.ok) {
                 throw new Error('Chat could not be loaded');
             }
 
-            data = await perfTrace.measureAsync('payload-parse', () => response.json());
+            data = await response.json();
         }
 
         const currentCharacter = startedChid !== undefined ? characters[startedChid] : null;
@@ -9024,7 +8882,7 @@ export async function getChat({ allowNewChat = false } = {}) {
             return;
         }
 
-        perfTrace.measure('payload-apply', () => applyCharacterChatPayload(data, allowNewChat));
+        applyCharacterChatPayload(data, allowNewChat);
 
         if (usePayloadTransport && windowedCursor) {
             setWindowedChatState({
@@ -9043,9 +8901,8 @@ export async function getChat({ allowNewChat = false } = {}) {
         if (!chat_metadata.integrity) {
             chat_metadata.integrity = uuidv4();
         }
-        await getChatResult({ allowNewChat }, perfTrace);
+        await getChatResult({ allowNewChat });
         eventSource.emit(event_types.CHAT_LOADED, { detail: { id: this_chid, character: characters[this_chid] } });
-        perfTrace.finish({ success: true, messages: chat.length });
 
         // Focus on the textarea if not already focused on a visible text input
         delay(debounce_timeout.short).then(() => {
@@ -9065,7 +8922,6 @@ export async function getChat({ allowNewChat = false } = {}) {
 
         console.error(error);
         toastr.error(t`Chat could not be loaded.`, t`Chat Load Failed`);
-        perfTrace.finish({ success: false, messages: chat.length });
         throw error;
     }
 }
@@ -9085,34 +8941,29 @@ function applyCharacterChatPayload(data, allowNewChat) {
     }
 }
 
-async function getChatResult({ allowNewChat = false } = {}, perfTrace = null) {
-    const freshChat = await perfTrace.measureAsync('chat-state-prepare', async () => {
-        name2 = characters[this_chid].name;
-        let created = false;
-        if (allowNewChat && chat.length === 0) {
-            const message = getFirstMessage();
-            if (message.mes) {
-                chat.push(message);
-                created = true;
-            }
-            // Make sure the chat appears on the server
-            await saveChatConditional();
+async function getChatResult({ allowNewChat = false } = {}) {
+    name2 = characters[this_chid].name;
+    let freshChat = false;
+    if (allowNewChat && chat.length === 0) {
+        const message = getFirstMessage();
+        if (message.mes) {
+            chat.push(message);
+            freshChat = true;
         }
-        return created;
-    });
-    await perfTrace.measureAsync('itemized-prompts-load', () => loadItemizedPrompts(getCurrentChatId()));
-    await perfTrace.measureAsync('messages-render', () => printMessages());
-    perfTrace.measure('selection-sync', () => select_selected_character(this_chid));
+        // Make sure the chat appears on the server
+        await saveChatConditional();
+    }
+    await loadItemizedPrompts(getCurrentChatId());
+    await printMessages();
+    select_selected_character(this_chid);
 
-    await perfTrace.measureAsync('chat-changed-listeners', () => eventSource.emit(event_types.CHAT_CHANGED, (getCurrentChatId())));
-    if (freshChat) await perfTrace.measureAsync('chat-created-listeners', () => eventSource.emit(event_types.CHAT_CREATED));
+    await eventSource.emit(event_types.CHAT_CHANGED, (getCurrentChatId()));
+    if (freshChat) await eventSource.emit(event_types.CHAT_CREATED);
 
     if (chat.length === 1) {
         const chat_id = (chat.length - 1);
-        await perfTrace.measureAsync('first-message-listeners', async () => {
-            await eventSource.emit(event_types.MESSAGE_RECEIVED, chat_id, 'first_message');
-            await eventSource.emit(event_types.CHARACTER_MESSAGE_RENDERED, chat_id, 'first_message');
-        });
+        await eventSource.emit(event_types.MESSAGE_RECEIVED, chat_id, 'first_message');
+        await eventSource.emit(event_types.CHARACTER_MESSAGE_RENDERED, chat_id, 'first_message');
     }
 }
 

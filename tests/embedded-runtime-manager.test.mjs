@@ -83,11 +83,6 @@ test('EmbeddedRuntimeManager enforces budgets and chooses a stable active set', 
         assert.deepEqual(s2.calls[0], { type: 'dehydrate', id: 's2', reason: 'budget' });
         assert.deepEqual(s3.calls[0], { type: 'dehydrate', id: 's3', reason: 'visibility' });
 
-        const snap = manager.getPerfSnapshot();
-        assert.equal(snap.active, 1);
-        assert.equal(snap.parked, 2);
-        assert.equal(snap.activeWeight, 10);
-        assert.equal(snap.activeIframes, 1);
     } finally {
         dom.cleanup();
     }
@@ -126,7 +121,6 @@ test('EmbeddedRuntimeManager touch() affects ranking under tight budgets', async
         manager.register(b.slot);
         manager.reconcile();
 
-        assert.equal(manager.getPerfSnapshot().active, 1);
         assert.deepEqual(a.calls[0], { type: 'hydrate', id: 'a', reason: 'manual' });
         assert.deepEqual(b.calls[0], { type: 'dehydrate', id: 'b', reason: 'budget' });
 
@@ -135,8 +129,6 @@ test('EmbeddedRuntimeManager touch() affects ranking under tight budgets', async
         manager.reconcile();
 
         // After touch, b wins the single-slot budget.
-        const snap = manager.getPerfSnapshot();
-        assert.equal(snap.active, 1);
         assert.ok(b.calls.some((c) => c.type === 'hydrate'));
         assert.ok(a.calls.some((c) => c.type === 'dehydrate' && c.reason === 'budget'));
     } finally {

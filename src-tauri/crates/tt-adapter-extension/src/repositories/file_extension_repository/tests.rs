@@ -68,31 +68,6 @@ fn test_http_clients() -> Arc<HttpClientPool> {
 }
 
 #[tokio::test]
-async fn discovers_perf_profiler_as_system_extension() {
-    let (_root, user_extensions_dir, global_extensions_dir, source_store_root) =
-        setup_paths().await;
-    let repository = FileExtensionRepository::new(
-        user_extensions_dir,
-        global_extensions_dir,
-        source_store_root,
-        test_http_clients(),
-    );
-
-    let extension = repository
-        .discover_extensions()
-        .await
-        .expect("discover system extensions")
-        .into_iter()
-        .find(|extension| extension.name == "tauritavern-perf-profiler")
-        .expect("performance profiler system extension");
-
-    assert_eq!(
-        extension.extension_type,
-        tt_domain::models::extension::ExtensionType::System
-    );
-}
-
-#[tokio::test]
 async fn embedded_install_version_and_update_round_trip_over_smart_http() {
     let (root, user_extensions_dir, global_extensions_dir, source_store_root) = setup_paths().await;
     let mut server = GitTestServer::start(root.join("git-origin"));

@@ -33,7 +33,7 @@
 ### 2.2 Bootloader：分层 import + Android import 重试
 
 - `src/init.js`
-  - 设置：`window.__TAURI_RUNNING__ = true`，并计算 `globalThis.__TAURITAVERN_PERF_ENABLED__`
+  - 设置：`window.__TAURI_RUNNING__ = true`
   - 通过 `importWithRetry()` 依次加载：
     1) `./lib.js`（静态依赖 `src/dist/lib.core.bundle.js`）
     2) `./tauri-main.js`（安装 Host Kernel：路由/拦截器/ABI）
@@ -188,13 +188,8 @@ Panel Runtime 会在 `APP_READY` 后安装，用于在抽屉关闭时把部分�
 
 ---
 
-## 8. 可观测性（perf + 状态）
+## 8. 启动状态
 
-- Perf 开关：`localStorage tt:perf = '1'` 或 URL `?ttPerf=1`
-- 标记（部分）：
-  - `src/init.js`：`tt:init:*`
-  - `src/tauri/main/bootstrap.js`：`tt:tauri:*`
-  - `src/script.js`：`tt:startup:shell/core/full` + `tt:startup:ready`
 - 运行时提示：
   - `src/scripts/tauri/startup/startup-status-overlay.js`：右下角非阻塞启动状态 overlay（`APP_READY` 后移除）
 

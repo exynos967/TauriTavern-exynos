@@ -25,7 +25,7 @@
 
 当前启动链路（见 `docs/FrontendGuide.md`）：
 
-1. `src/init.js`：负责最早期的环境标记、可选 perf 开关与动态 import。
+1. `src/init.js`：负责最早期的环境标记与动态 import。
 2. `src/tauri-main.js`：薄入口，仅调用 `bootstrapTauriMain()`。
 3. `src/tauri/main/bootstrap.js`：composition root，创建 context、注册 routes、安装拦截器与补丁。
 4. `src/script.js`：上游 SillyTavern 主应用入口（vendor）。
@@ -35,10 +35,6 @@
 - `window.__TAURITAVERN_MAIN_READY__ : Promise<void>`
   - 由 `src/tauri/main/bootstrap.js` 写入，表示宿主层初始化已完成（或失败已被捕获并写入 console）。
   - 在 Tauri runtime 下，resolve 前必须完成 Rust `BackendReadiness` 等待，确保首批依赖 `AppState` 的命令不靠 “state not managed” 文本重试作为正常控制流。
-- `window.__TAURITAVERN_PERF_READY__ : Promise<unknown> | undefined`
-  - 仅在 perf-hud 启用时存在（见第 5 节）。
-- `globalThis.__TAURITAVERN_PERF_ENABLED__ : boolean`
-  - 由 `src/init.js` 在动态 import 前写入；`bootstrap` 会优先读取它（避免重复计算/时序差异）。
 - `window.__TAURI_RUNNING__ : true`
   - 由 `src/init.js` 写入；用于桥接层尽早判断 Tauri 环境（避免移动端注入时序 race）。
 
@@ -286,22 +282,14 @@
 
 - `x-tauritavern-trace-id: <traceId>`
 
-用途：将 DevTools Network 中的单次请求，与 console 日志 / perf-hud 数据关联起来，定位第三方脚本导致的异常与性能热点。
+用途：将 DevTools Network 中的单次请求与 console 日志关联起来，定位第三方脚本导致的异常。
 header 名也可从 `window.__TAURITAVERN__?.traceHeader` 获取（用于避免硬编码）。
 
 ---
 
-## 5. 兼容补丁与观测（Public/Project）
+## 5. 兼容补丁（Public/Project）
 
-### 5.1 Perf HUD（Project，作为验收工具）
-
-- 开关：
-  - `localStorage.setItem('tt:perf','1')` 后 reload
-  - 或 URL 参数 `?ttPerf=1`
-- 全局对象：
-  - `window.__TAURITAVERN_PERF__`（见 `src/tauri/main/perf/perf-hud.js`）
-
-### 5.2 移动端运行时兼容（Public in practice）
+### 5.1 移动端运行时兼容（Public in practice）
 
 移动端旧 WebView 的 polyfills 与第三方浮层/窗口 surface classifier（配合 geometry firewall 的 safe-area contract）属于“运行环境的一部分”，第三方会依赖其存在：
 

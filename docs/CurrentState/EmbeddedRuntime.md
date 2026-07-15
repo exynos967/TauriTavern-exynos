@@ -28,7 +28,7 @@
 ### 2.1 Manager（预算与状态机）
 
 - 入口：`src/tauri/main/services/embedded-runtime/embedded-runtime-service.js`
-  - 创建 manager 并挂到 `globalThis.__TAURITAVERN_EMBEDDED_RUNTIME__`（用于 perf-hud / 调试）。
+  - 创建 manager 并挂到 `globalThis.__TAURITAVERN_EMBEDDED_RUNTIME__`（用于运行时调试）。
 - 核心实现：`src/tauri/main/services/embedded-runtime/embedded-runtime-manager.js`
   - slot 状态：`cold | active | parked | disposed`
   - reconcile 触发：register/touch/可见性变化（IntersectionObserver）等
@@ -150,13 +150,9 @@ reconcile 后 manager 会根据 profile 预算与可见性选择：
 
 ---
 
-## 7. 调试与观测
+## 7. 调试
 
-- perf-hud：`src/tauri/main/perf/perf-hud.js`
-  - HUD 中 `Runtime:` 行来自 `__TAURITAVERN_EMBEDDED_RUNTIME__.getPerfSnapshot()`
-  - 可用 `Ctrl+Alt+P` 打开/关闭；或 `localStorage tt:perf=1` 自动启用
 - 调试入口：`globalThis.__TAURITAVERN_EMBEDDED_RUNTIME__`
-  - `getPerfSnapshot()` 可直接查看 counters（hydrate/dehydrate/register/unregister 等）
 - 常用 DOM 标记：
   - slotId：`data-tt-runtime-slot-id`
   - 移动保护：`data-tt-runtime-moving="1"`（渲染事务搬运 wrapper 时的临时标记）

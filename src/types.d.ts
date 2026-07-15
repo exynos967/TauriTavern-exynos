@@ -43,7 +43,6 @@ interface Window {
         register: (slot: any) => { id: string; unregister: () => void };
         unregister: (id: string) => void;
         reconcile: () => void;
-        getPerfSnapshot: () => any;
     };
 }
 

@@ -1,5 +1,4 @@
 import { warn } from '../index.js';
-import { getAutomationProfiler, QUICK_REPLY_PERF_IDENTITY, reportAutomationSample } from '../../../tauri/perf/automation-profiler.js';
 import { QuickReply } from './QuickReply.js';
 import { QuickReplySettings } from './QuickReplySettings.js';
 
@@ -19,33 +18,15 @@ export class AutoExecuteHandler {
     }
 
 
-    async performAutoExecute(/** @type {QuickReply[]} */qrList, trigger) {
-        for (const [index, qr] of qrList.entries()) {
-            const profiler = getAutomationProfiler();
-            const startedAt = profiler ? performance.now() : 0;
-            let success = false;
+    async performAutoExecute(/** @type {QuickReply[]} */qrList) {
+        for (const qr of qrList) {
             this.preventAutoExecuteStack.push(qr.preventAutoExecute);
             try {
                 await qr.execute({ isAutoExecute: true });
-                success = true;
             } catch (ex) {
                 warn(ex);
             } finally {
                 this.preventAutoExecuteStack.pop();
-                if (profiler) {
-                    const identity = qr[QUICK_REPLY_PERF_IDENTITY] ?? {};
-                    reportAutomationSample(profiler, {
-                        kind: 'quick-reply-auto',
-                        trigger,
-                        index,
-                        quickReplyId: Number.isFinite(Number(qr.id)) ? Number(qr.id) : null,
-                        setKey: identity.setKey ?? null,
-                        sourceKey: identity.sourceKey ?? null,
-                        scope: identity.scope ?? null,
-                        success,
-                        durationMs: performance.now() - startedAt,
-                    });
-                }
             }
         }
     }
@@ -65,37 +46,37 @@ export class AutoExecuteHandler {
 
     async handleStartup() {
         if (!this.checkExecute()) return;
-        await this.performAutoExecute(this.getCommands('executeOnStartup'), 'executeOnStartup');
+        await this.performAutoExecute(this.getCommands('executeOnStartup'));
     }
 
     async handleUser() {
         if (!this.checkExecute()) return;
-        await this.performAutoExecute(this.getCommands('executeOnUser'), 'executeOnUser');
+        await this.performAutoExecute(this.getCommands('executeOnUser'));
     }
 
     async handleAi() {
         if (!this.checkExecute()) return;
-        await this.performAutoExecute(this.getCommands('executeOnAi'), 'executeOnAi');
+        await this.performAutoExecute(this.getCommands('executeOnAi'));
     }
 
     async handleChatChanged() {
         if (!this.checkExecute()) return;
-        await this.performAutoExecute(this.getCommands('executeOnChatChange'), 'executeOnChatChange');
+        await this.performAutoExecute(this.getCommands('executeOnChatChange'));
     }
 
     async handleGroupMemberDraft() {
         if (!this.checkExecute()) return;
-        await this.performAutoExecute(this.getCommands('executeOnGroupMemberDraft'), 'executeOnGroupMemberDraft');
+        await this.performAutoExecute(this.getCommands('executeOnGroupMemberDraft'));
     }
 
     async handleNewChat() {
         if (!this.checkExecute()) return;
-        await this.performAutoExecute(this.getCommands('executeOnNewChat'), 'executeOnNewChat');
+        await this.performAutoExecute(this.getCommands('executeOnNewChat'));
     }
 
     async handleBeforeGeneration() {
         if (!this.checkExecute()) return;
-        await this.performAutoExecute(this.getCommands('executeBeforeGeneration'), 'executeBeforeGeneration');
+        await this.performAutoExecute(this.getCommands('executeBeforeGeneration'));
     }
 
     /**
@@ -118,6 +99,6 @@ export class AutoExecuteHandler {
             ...getFromConfig(this.settings.charConfig),
         ];
 
-        await this.performAutoExecute(qrList, 'worldInfoActivation');
+        await this.performAutoExecute(qrList);
     }
 }

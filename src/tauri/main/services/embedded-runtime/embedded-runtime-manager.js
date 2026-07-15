@@ -33,20 +33,6 @@ export function createEmbeddedRuntimeManager({ profile, now = () => Date.now(), 
     let reconcilePending = false;
     let reconcileSeq = 0;
 
-    const counters = {
-        hydrate: 0,
-        dehydrate: 0,
-        parkVisibility: 0,
-        parkBudget: 0,
-        register: 0,
-        unregister: 0,
-        reconcile: 0,
-        lastReconcileMs: 0,
-        lastReconcileAt: 0,
-        budgetDeny: 0,
-        parkReasonChange: 0,
-    };
-
     const observer = new IntersectionObserver((entries) => {
         const ts = now();
         const rootBounds = rootElement ? rootElement.getBoundingClientRect() : null;
@@ -137,8 +123,6 @@ export function createEmbeddedRuntimeManager({ profile, now = () => Date.now(), 
      */
     function reconcile(reason) {
         const startedAt = now();
-        counters.reconcile += 1;
-        counters.lastReconcileAt = startedAt;
 
         /** @type {Array<{ id: string; inViewport: boolean; visible: boolean; priority: number; lastVisibleAt: number; lastTouchedAt: number }>} */
         const desired = [];
@@ -184,15 +168,12 @@ export function createEmbeddedRuntimeManager({ profile, now = () => Date.now(), 
             const slotIframes = record.slot.iframeCount;
 
             if (normalizedProfile.maxActiveSlots > 0 && activeSlots + 1 > normalizedProfile.maxActiveSlots) {
-                counters.budgetDeny += 1;
                 continue;
             }
             if (normalizedProfile.maxActiveWeight > 0 && activeWeight + slotWeight > normalizedProfile.maxActiveWeight) {
-                counters.budgetDeny += 1;
                 continue;
             }
             if (normalizedProfile.maxActiveIframes > 0 && activeIframes + slotIframes > normalizedProfile.maxActiveIframes) {
-                counters.budgetDeny += 1;
                 continue;
             }
 
@@ -212,7 +193,6 @@ export function createEmbeddedRuntimeManager({ profile, now = () => Date.now(), 
                 record.state = 'active';
                 record.parkReason = '';
                 record.activatedAt = startedAt;
-                counters.hydrate += 1;
                 continue;
             }
             if (!shouldBeActive) {
@@ -225,24 +205,15 @@ export function createEmbeddedRuntimeManager({ profile, now = () => Date.now(), 
                     record.state = 'parked';
                     record.parkReason = parkReason;
                     record.deactivatedAt = startedAt;
-                    counters.dehydrate += 1;
-                    if (parkReason === 'budget') {
-                        counters.parkBudget += 1;
-                    } else {
-                        counters.parkVisibility += 1;
-                    }
                     continue;
                 }
 
                 if (record.state === 'parked' && record.parkReason !== parkReason) {
                     record.slot.dehydrate(parkReason);
                     record.parkReason = parkReason;
-                    counters.parkReasonChange += 1;
                 }
             }
         }
-
-        counters.lastReconcileMs = now() - startedAt;
     }
 
     /**
@@ -263,7 +234,6 @@ export function createEmbeddedRuntimeManager({ profile, now = () => Date.now(), 
             record.slot.dispose();
         }
         slots.delete(id);
-        counters.unregister += 1;
     }
 
     /**
@@ -379,51 +349,11 @@ export function createEmbeddedRuntimeManager({ profile, now = () => Date.now(), 
         if (normalizedSlot.visibilityMode === 'intersection') {
             observer.observe(normalizedSlot.visibilityTarget);
         }
-        counters.register += 1;
         requestReconcile('register');
 
         return {
             id: normalizedSlot.id,
             unregister: () => unregister(normalizedSlot.id),
-        };
-    }
-
-    function getPerfSnapshot() {
-        let registered = 0;
-        let active = 0;
-        let parked = 0;
-        let visible = 0;
-        let inViewport = 0;
-        let activeWeight = 0;
-        let activeIframes = 0;
-
-        for (const record of slots.values()) {
-            registered += 1;
-            if (record.visible) {
-                visible += 1;
-            }
-            if (record.inViewport) {
-                inViewport += 1;
-            }
-            if (record.state === 'active') {
-                active += 1;
-                activeWeight += record.slot.weight;
-                activeIframes += record.slot.iframeCount;
-            } else if (record.state === 'parked') {
-                parked += 1;
-            }
-        }
-
-        return {
-            profile: normalizedProfile.name,
-            registered,
-            visible,
-            inViewport,
-            active,
-            parked,
-            activeWeight,
-            activeIframes,
-            counters: { ...counters },
         };
     }
 
@@ -437,7 +367,6 @@ export function createEmbeddedRuntimeManager({ profile, now = () => Date.now(), 
             cancelPendingReconcile();
             reconcile('manual');
         },
-        getPerfSnapshot,
         get profile() {
             return normalizedProfile.name;
         },

@@ -1,5 +1,3 @@
-import { createInvokeObservation } from './invoke-observation.js';
-
 function normalizeCommand(command) {
     return String(command || '').trim();
 }
@@ -264,10 +262,9 @@ function createWriteBehindState({ key, delayMs = 0, merge, maxConcurrent = 0 } =
  *   transport: InvokeTransport;
  *   policies?: Record<string, InvokePolicy> | undefined;
  *   now?: (() => number) | undefined;
- *   getObserver?: ((command: string) => ((sample: object) => void) | null | undefined) | undefined;
  * }} options
  */
-export function createInvokeBroker({ transport, policies = {}, now = () => Date.now(), getObserver } = {}) {
+export function createInvokeBroker({ transport, policies = {}, now = () => Date.now() } = {}) {
     if (typeof transport !== 'function') {
         throw new Error('InvokeBroker requires a transport(command, args) function');
     }
@@ -328,21 +325,10 @@ export function createInvokeBroker({ transport, policies = {}, now = () => Date.
             throw new Error('InvokeBroker: command is required');
         }
 
-        const observation = createInvokeObservation(normalizedCommand, getObserver, now);
         getStatsEntry(normalizedCommand).invokes += 1;
         const policy = getPolicy(normalizedCommand);
         if (!policy) {
-            const endTransport = observation.startTransport();
-            try {
-                const result = await transportWithStats(normalizedCommand, args);
-                endTransport();
-                observation.finish('transport', true);
-                return result;
-            } catch (error) {
-                endTransport();
-                observation.finish('transport', false);
-                throw error;
-            }
+            return transportWithStats(normalizedCommand, args);
         }
 
         if (policy.kind === 'dedupe') {
@@ -352,36 +338,21 @@ export function createInvokeBroker({ transport, policies = {}, now = () => Date.
             const cached = state.readCache(key);
             if (cached !== null) {
                 getStatsEntry(normalizedCommand).cacheHits += 1;
-                observation.finish('cache', true);
                 return cached;
             }
 
             const inflight = state.inFlight.get(key);
             if (inflight) {
                 getStatsEntry(normalizedCommand).dedupeHits += 1;
-                try {
-                    const result = await withTimeout(inflight, policy.timeoutMs, () => {
-                        const error = new Error(`InvokeBroker timed out: ${normalizedCommand}`);
-                        error.name = 'InvokeBrokerTimeoutError';
-                        return error;
-                    });
-                    observation.finish('dedupe', true);
-                    return result;
-                } catch (error) {
-                    observation.finish('dedupe', false);
-                    throw error;
-                }
+                return withTimeout(inflight, policy.timeoutMs, () => {
+                    const error = new Error(`InvokeBroker timed out: ${normalizedCommand}`);
+                    error.name = 'InvokeBrokerTimeoutError';
+                    return error;
+                });
             }
 
             const epoch = state.getEpoch(key);
-            const run = async () => {
-                const endTransport = observation.startTransport();
-                try {
-                    return await transportWithStats(normalizedCommand, args);
-                } finally {
-                    endTransport();
-                }
-            };
+            const run = async () => transportWithStats(normalizedCommand, args);
             const task = state.limiter ? () => state.limiter.run(run) : run;
             const promise = task()
                 .then((result) => {
@@ -393,18 +364,11 @@ export function createInvokeBroker({ transport, policies = {}, now = () => Date.
                 });
 
             state.inFlight.set(key, promise);
-            try {
-                const result = await withTimeout(promise, policy.timeoutMs, () => {
-                    const error = new Error(`InvokeBroker timed out: ${normalizedCommand}`);
-                    error.name = 'InvokeBrokerTimeoutError';
-                    return error;
-                });
-                observation.finish('transport', true);
-                return result;
-            } catch (error) {
-                observation.finish('transport', false);
-                throw error;
-            }
+            return withTimeout(promise, policy.timeoutMs, () => {
+                const error = new Error(`InvokeBroker timed out: ${normalizedCommand}`);
+                error.name = 'InvokeBrokerTimeoutError';
+                return error;
+            });
         }
 
         if (policy.kind === 'writeBehind') {
