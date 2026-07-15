@@ -15,6 +15,7 @@ import { registerLifecycleFlushHandler } from './tauri/main/services/lifecycle/l
 import { replaceMesTextHtmlWithRuntimePolicy } from './scripts/tauri/message/mes-text-write.js';
 import { getCodeHighlightCoordinator } from './scripts/tauri/perf/code-highlight-coordinator.js';
 import { isInlineDrawerContentOpen, setInlineDrawerContentOpen } from './scripts/tauri/perf/inline-drawer-motion.js';
+import { createChatScrollController, createChatScrollIntentTracker } from './scripts/tauri/perf/chat-scroll-controller.js';
 import { getStreamingRenderInterval, normalizeStreamingFps, shouldCommitStreamingMessage } from './scripts/tauri/perf/streaming-render-policy.js';
 import { CHAT_COMMIT_REASON } from './scripts/chat-payload-transport.js';
 import { getActiveChatSnapshot } from './tauri/main/adapters/st/active-chat-ref.js';
@@ -1925,7 +1926,7 @@ export async function printMessages({ frontendSourceHandoffEvent = null } = {}) 
 
     await redisplayChat({ startIndex, fade: false, frontendSourceHandoffEvent: effectiveHandoffEvent });
 
-    scrollChatToBottom({ waitForFrame: true });
+    scrollChatToBottom({ waitForFrame: true, force: true });
     delay(debounce_timeout.short).then(() => scrollOnMediaLoad());
 }
 
@@ -2168,6 +2169,7 @@ export async function sendTextareaMessage() {
     if (is_send_press) return;
     if (isExecutingCommandsFromChatInput) return;
 
+    chatScrollController.captureGenerationIntent();
     hideSwipeButtons(); //Swipe buttons must be hidden now, otherwise concurrent generations are possible.
 
     let routeToAgentMode = false;
@@ -2209,6 +2211,7 @@ export async function sendTextareaMessage() {
         }
         throw error;
     } finally {
+        chatScrollController.clearGenerationIntent();
         showSwipeButtons();
     }
 }
@@ -2734,6 +2737,9 @@ export function appendMediaToMessage(mes, messageElement, scrollBehavior = SCROL
             chatElement.scrollTop(scrollPosition);
             return;
         }
+        if (!chatScrollController.shouldFollowOutput()) {
+            return;
+        }
         const newChatHeight = chatElement.prop('scrollHeight');
         const diff = newChatHeight - chatHeight;
         chatElement.scrollTop(scrollPosition + diff);
@@ -3067,6 +3073,7 @@ function getMessageTextHTML(message, { messageId = chat.indexOf(message) }) {
  * @returns {JQuery<HTMLElement>} The newly added message element
  */
 export function addOneMessage(mes, { type = undefined, insertAfter = null, scroll = true, insertBefore = null, forceId = null, showSwipes = true } = {}) {
+    const shouldScroll = scroll;
     // Callers push the new message to chat before calling addOneMessage
     const messageId = (() => {
         if (typeof forceId === 'number') {
@@ -3094,9 +3101,9 @@ export function addOneMessage(mes, { type = undefined, insertAfter = null, scrol
         mes.swipes ??= [mes.mes];
         //This keeps listeners intact.
         messageElement = chatElement.find(`[mesid="${messageId}"]`);
-        updateMessageElement(mes, { messageId, messageElement, adjustMediaScroll: scroll ? SCROLL_BEHAVIOR.ADJUST : SCROLL_BEHAVIOR.NONE });
+        updateMessageElement(mes, { messageId, messageElement, adjustMediaScroll: shouldScroll ? SCROLL_BEHAVIOR.ADJUST : SCROLL_BEHAVIOR.NONE });
     } else {
-        messageElement = updateMessageElement(mes, { messageId, adjustMediaScroll: scroll ? SCROLL_BEHAVIOR.ADJUST : SCROLL_BEHAVIOR.NONE });
+        messageElement = updateMessageElement(mes, { messageId, adjustMediaScroll: shouldScroll ? SCROLL_BEHAVIOR.ADJUST : SCROLL_BEHAVIOR.NONE });
         if (typeof insertAfter === 'number' && insertAfter >= 0) {
             const target = chatElement.find(`.mes[mesid="${insertAfter}"]`);
             $(messageElement).insertAfter(target);
@@ -3115,8 +3122,8 @@ export function addOneMessage(mes, { type = undefined, insertAfter = null, scrol
 
     if (showSwipes) refreshSwipeButtons();
     // Don't scroll if not inserting last
-    if (!insertAfter && !insertBefore && scroll) {
-        scrollChatToBottom({ waitForFrame: true });
+    if (!insertAfter && !insertBefore && shouldScroll) {
+        scrollChatToBottom({ waitForFrame: true, force: true });
     }
 
     applyCharacterTagsToMessageDivs({ mesIds: messageId });
@@ -3286,19 +3293,10 @@ function formatGenerationTimer(gen_started, gen_finished, tokenCount, reasoningD
     return { timerValue, timerTitle };
 }
 
-let requestId = null;
-
-/**
- * Scrolls the chat to the bottom if configured to do so.
- * @param {object} [options] Options
- * @param {boolean} [options.waitForFrame] If true, waits for the animation frame before scrolling
- */
-export function scrollChatToBottom({ waitForFrame } = {}) {
-    if (!power_user.auto_scroll_chat_to_bottom) {
-        return;
-    }
-
-    const doScroll = () => {
+const chatScrollIntent = createChatScrollIntentTracker();
+const chatScrollController = createChatScrollController({
+    readViewport: () => chatElement[0],
+    scrollToBottom: () => {
         let position = chatElement[0].scrollHeight;
 
         if (power_user.waifuMode) {
@@ -3310,23 +3308,20 @@ export function scrollChatToBottom({ waitForFrame } = {}) {
         }
 
         chatElement.scrollTop(position);
-        requestId = null;
-    };
+    },
+    requestFrame: callback => requestAnimationFrame(callback),
+    cancelFrame: id => cancelAnimationFrame(id),
+    canAutoScroll: () => power_user.auto_scroll_chat_to_bottom,
+});
 
-    // Do not check truthiness. requestId can loop to zero.
-    if (requestId !== null) {
-        cancelAnimationFrame(requestId);
-    }
-
-    if (!waitForFrame) {
-        doScroll();
-        return;
-    }
-
-    // This prevents layout thrashing.
-    // https://developer.mozilla.org/en-US/docs/Web/API/Window/requestAnimationFrame#return_value
-    // https://gist.github.com/paulirish/5d52fb081b3570c81e3a#file-what-forces-layout-md
-    requestId = requestAnimationFrame(() => doScroll());
+/**
+ * Scrolls the chat to the bottom if configured to do so.
+ * @param {object} [options] Options
+ * @param {boolean} [options.waitForFrame] If true, waits for the animation frame before scrolling
+ * @param {boolean} [options.force] If true, treats the scroll as explicit navigation
+ */
+export function scrollChatToBottom({ waitForFrame, force = false } = {}) {
+    chatScrollController.requestScroll({ waitForFrame, force });
 }
 
 /**
@@ -4345,7 +4340,7 @@ class StreamingProcessor {
             this.setFirstSwipe(messageId);
         }
 
-        if (!scrollLock) {
+        if (chatScrollController.shouldFollowOutput()) {
             scrollChatToBottom({ waitForFrame: true });
         }
     }
@@ -4389,7 +4384,8 @@ class StreamingProcessor {
 
         if (Array.isArray(this.images) && this.images.length > 0) {
             await processImageAttachment(message, { imageUrls: this.images });
-            appendMediaToMessage(message, $(this.messageDom));
+            const mediaScrollBehavior = chatScrollController.shouldFollowOutput() ? SCROLL_BEHAVIOR.ADJUST : SCROLL_BEHAVIOR.NONE;
+            appendMediaToMessage(message, $(this.messageDom), mediaScrollBehavior);
         }
 
         // Store reasoning signature for models that support multi-turn context
@@ -4473,7 +4469,6 @@ class StreamingProcessor {
         if (this.messageId == -1) {
             this.messageId = await this.onStartStreaming(this.firstMessageText);
             await delay(1); // delay for message to be rendered
-            scrollLock = false;
         }
 
         // Stopping strings are expensive to calculate, especially with macros enabled. To remove stopping strings
@@ -5000,7 +4995,16 @@ function cleanupGenerationAfterUnhandledError(type, dryRun) {
     unblockGeneration(type);
 }
 
-async function GenerateInternal(type, { automatic_trigger, force_name2, quiet_prompt, quietToLoud, skipWIAN, force_chid, signal, quietImage, quietName, jsonSchema = null, depth = 0, agentMode = false, agentProfileId = null, agentContextPolicy = null, agentSystemPrompt = null } = {}, dryRun = false) {
+async function GenerateInternal(type, options = {}, dryRun = false) {
+    chatScrollController.beginGeneration();
+    try {
+        return await GenerateInternalCore(type, options, dryRun);
+    } finally {
+        chatScrollController.endGeneration();
+    }
+}
+
+async function GenerateInternalCore(type, { automatic_trigger, force_name2, quiet_prompt, quietToLoud, skipWIAN, force_chid, signal, quietImage, quietName, jsonSchema = null, depth = 0, agentMode = false, agentProfileId = null, agentContextPolicy = null, agentSystemPrompt = null } = {}, dryRun = false) {
     console.log('Generate entered');
     setGenerationProgress(0);
     generation_started = new Date();
@@ -12812,6 +12816,14 @@ jQuery(async function () {
     }
 
     const chatElementScroll = document.getElementById('chat');
+    const markChatScrollIntent = () => chatScrollIntent.mark();
+    chatElementScroll.addEventListener('wheel', markChatScrollIntent, { passive: true });
+    chatElementScroll.addEventListener('touchmove', markChatScrollIntent, { passive: true });
+    chatElementScroll.addEventListener('pointermove', event => {
+        if (event.buttons !== 0) {
+            chatScrollIntent.mark();
+        }
+    }, { passive: true });
     const chatScrollHandler = function () {
         if (power_user.waifuMode) {
             scrollLock = true;
@@ -12828,6 +12840,10 @@ jQuery(async function () {
         // Cancel autoscroll if the user scrolls up
         if (!scrollLock && !scrollIsAtBottom) {
             scrollLock = true;
+        }
+        chatScrollController.onViewportChanged({ userInitiated: chatScrollIntent.isActive() });
+        if (scrollIsAtBottom) {
+            chatScrollIntent.clear();
         }
     };
     chatElementScroll.addEventListener('scroll', chatScrollHandler, { passive: true });
