@@ -15,7 +15,7 @@ import { registerLifecycleFlushHandler } from './tauri/main/services/lifecycle/l
 import { replaceMesTextHtmlWithRuntimePolicy } from './scripts/tauri/message/mes-text-write.js';
 import { getCodeHighlightCoordinator } from './scripts/tauri/perf/code-highlight-coordinator.js';
 import { isInlineDrawerContentOpen, setInlineDrawerContentOpen } from './scripts/tauri/perf/inline-drawer-motion.js';
-import { getStreamingRenderInterval, shouldCommitStreamingMessage } from './scripts/tauri/perf/streaming-render-policy.js';
+import { getStreamingRenderInterval, normalizeStreamingFps, shouldCommitStreamingMessage } from './scripts/tauri/perf/streaming-render-policy.js';
 import { CHAT_COMMIT_REASON } from './scripts/chat-payload-transport.js';
 import { getActiveChatSnapshot } from './tauri/main/adapters/st/active-chat-ref.js';
 import { extension_prompt_roles, extension_prompt_types } from './scripts/extension-prompts.js';
@@ -4146,6 +4146,8 @@ class StreamingProcessor {
         this.messageDom = null;
         /** @type {HTMLElement} */
         this.messageTextDom = null;
+        /** @type {string|null} Last canonical message HTML committed during streaming. */
+        this.lastCommittedHtml = null;
         /** @type {HTMLElement} */
         this.messageTimerDom = null;
         /** @type {HTMLElement} */
@@ -4317,7 +4319,7 @@ class StreamingProcessor {
                 false,
             );
             if (this.messageTextDom instanceof HTMLElement && shouldCommitStreamingMessage({
-                currentHtml: this.messageTextDom.innerHTML,
+                lastCommittedHtml: this.lastCommittedHtml,
                 nextHtml: formattedText,
                 final: isFinal,
                 fadeIn: power_user.stream_fade_in,
@@ -4327,6 +4329,7 @@ class StreamingProcessor {
                 } else {
                     this.messageTextDom.innerHTML = formattedText;
                 }
+                this.lastCommittedHtml = formattedText;
             }
 
             const timePassed = formatGenerationTimer(this.timeStarted, currentTime, currentTokenCount, this.reasoningHandler.getDuration(), this.timeToFirstToken);
@@ -4480,9 +4483,9 @@ class StreamingProcessor {
         this.stoppingStrings = getStoppingStrings(isImpersonate, isContinue, main_api);
 
         try {
+            const streamingFps = normalizeStreamingFps(power_user.streaming_fps);
             const sw = new Stopwatch(getStreamingRenderInterval({
-                configuredFps: power_user.streaming_fps,
-                mobile: isMobile(),
+                configuredFps: streamingFps,
                 hidden: document.hidden,
             }));
             const timestamps = [];
@@ -4508,6 +4511,10 @@ class StreamingProcessor {
                 this.reasoningSignature = state?.signature ?? null;
                 this.native = state?.native ?? null;
                 await eventSource.emit(event_types.STREAM_TOKEN_RECEIVED, text);
+                sw.interval = getStreamingRenderInterval({
+                    configuredFps: streamingFps,
+                    hidden: document.hidden,
+                });
                 await sw.tick(async () => await this.onProgressStreaming(this.messageId, this.continueMessage + text));
             }
             const seconds = (timestamps[timestamps.length - 1] - timestamps[0]) / 1000;
