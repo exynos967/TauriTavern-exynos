@@ -1899,7 +1899,7 @@ export async function showMoreMessages(messagesToLoad = null) {
 
     if (isButtonInView) {
         const newHeight = chatElement.prop('scrollHeight');
-        // Non-windowed Show More uses the same anchor compensation contract as windowed batches.
+        // Show More anchor compensation is programmatic and must not cancel generation follow.
         setChatElementScrollTop(newHeight - prevHeight);
     }
 
