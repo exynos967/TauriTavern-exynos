@@ -1,0 +1,36 @@
+# Temporary: builds a Windows x64 MSI of this branch for hands-on testing. Delete after use.
+name: Temp Windows MSI
+
+on:
+  push:
+    branches: [ci/msi-build]
+  workflow_dispatch:
+
+jobs:
+  msi:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: "src-tauri -> target"
+
+      - uses: pnpm/setup@v2
+        with:
+          runtime: node@22
+          cache: true
+          install: false
+
+      - run: pnpm install --frozen-lockfile
+
+      - name: Build MSI
+        run: node scripts/tauri-app.mjs --prepare-frontend build --bundles msi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: TauriTavern-windows-x64-msi-${{ github.sha }}
+          path: src-tauri/target/release/bundle/msi/*.msi
+          if-no-files-found: error
